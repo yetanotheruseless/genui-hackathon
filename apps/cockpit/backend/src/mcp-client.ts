@@ -1,3 +1,4 @@
+import { setMaxListeners } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
@@ -19,6 +20,13 @@ export function getMcpClient(): Promise<Client> {
     const client = new Client({ name: "cockpit-backend", version: "0.1.0" });
     const transport = new StreamableHTTPClientTransport(new URL(STAR_SYSTEMS_URL));
     await client.connect(transport);
+    // Each fetch attaches an abort listener to the transport's shared
+    // signal; undici doesn't always remove them on response close, so the
+    // count climbs forever during get_state polling. The listener payload
+    // is small and harmless — silence the warning rather than fight the SDK.
+    const sig = (transport as unknown as { _abortController?: AbortController })
+      ._abortController?.signal;
+    if (sig) setMaxListeners(0, sig);
     console.log(`[mcp] connected to ${STAR_SYSTEMS_URL}`);
     return client;
   })();
