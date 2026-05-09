@@ -328,6 +328,9 @@ requestAnimationFrame(tick);
 // --- server polling ---
 poll(200, async () => {
   if (!gameId || !playerId) return;
+  // targetId / warpEngaged are server-owned (only `warp_to` sets them).
+  // Pushing them from here would clobber a captain's warp_to between the
+  // server write and our next get_state read.
   await callTool(pane.app, "sync_state", {
     gameId, playerId,
     state: {
@@ -335,8 +338,6 @@ poll(200, async () => {
       heading: [Math.sin(ship.yaw), Math.sin(ship.pitch), -Math.cos(ship.yaw)],
       throttle: ship.throttle,
       hoveredId: ship.hoveredId,
-      targetId: ship.targetId,
-      warpEngaged: ship.warpEngaged,
     },
   });
   const state = await callTool<any>(pane.app, "get_state", { gameId, playerId });

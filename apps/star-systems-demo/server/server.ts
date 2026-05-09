@@ -407,7 +407,12 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
-      Object.assign(player, args.state);
+      // Cockpit pushes its full local state including null targetId at 5 Hz.
+      // Skip null/undefined so the captain's warp_to (set on the server)
+      // isn't immediately wiped by the iframe's next sync.
+      for (const [k, v] of Object.entries(args.state)) {
+        if (v !== null && v !== undefined) (player as Record<string, unknown>)[k] = v;
+      }
       return { content: [{ type: "text", text: JSON.stringify({ kind: "ack" }) }] };
     },
   );
@@ -547,12 +552,32 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
-      if (!STAR_INDEX[args.objectId]) {
+      const star = STAR_INDEX[args.objectId];
+      if (!star) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `unknown objectId: ${args.objectId}` }) }] };
+      }
+      const dx = star.position[0] - player.position[0];
+      const dy = star.position[1] - player.position[1];
+      const dz = star.position[2] - player.position[2];
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // Cockpit lerp halts at OBSERVE_RANGE_LY = 0.15 ly. Re-engaging warp
+      // inside that radius can't move the ship — the iframe wouldn't lerp,
+      // and the captain would still report "ship under way". Tell the
+      // caller we're already there so it can phrase the reply honestly.
+      if (dist <= 0.15) {
+        return { content: [{
+          type: "text",
+          text: JSON.stringify({
+            kind: "already_at",
+            targetId: args.objectId,
+            name: star.name,
+            distanceLy: Number(dist.toFixed(3)),
+          }),
+        }] };
       }
       player.targetId = args.objectId;
       player.warpEngaged = true;
-      return { content: [{ type: "text", text: JSON.stringify({ kind: "warp_engaged", targetId: args.objectId }) }] };
+      return { content: [{ type: "text", text: JSON.stringify({ kind: "warp_engaged", targetId: args.objectId, name: star.name, distanceLy: Number(dist.toFixed(3)) }) }] };
     },
   );
 

@@ -30,6 +30,7 @@ The ship's Mind narrates discoveries (observe) and chats with the user (talk_to_
 Tool style:
   - gameId / playerId are auto-injected; you don't need to pass them.
   - Object ids are snake_case (e.g. "proxima_centauri", "alpha_centauri_a", "barnards_star", "sirius_a"), NOT the display name. ALWAYS call list_objects first to get the exact id, then pass that id to warp_to / observe. Never guess an id from the display name.
+  - Read each tool result before replying. warp_to returns either {kind: "warp_engaged"} (course set, ship moving) or {kind: "already_at"} (we're parked at that target — don't claim we're under way; tell the user we're already there).
   - Keep replies short. Three sentences max unless the user asks for detail.`;
 }
 
