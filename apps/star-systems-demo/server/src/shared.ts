@@ -46,7 +46,8 @@ export function setupPaneApp(name: string): PaneApp {
     if (!text) return;
     try {
       const data = JSON.parse(text) as PaneInit;
-      // Contact extension uses gameId+playerId; legacy worlds use worldId
+      // `worldId` is the legacy dungeon-demo field; `gameId` is the
+      // star-systems / Culture Contact field. Either resolves the init.
       const id = data.worldId ?? data.gameId;
       if (typeof id === "string") {
         resolveWorld(id);
