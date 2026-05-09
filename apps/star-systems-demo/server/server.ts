@@ -28,13 +28,17 @@ import {
 } from "@modelcontextprotocol/ext-apps/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { generateText } from "ai";
+import fs, { appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
-import { STARS, STAR_INDEX, spectralBucket, type Planet, type Star } from "./astrodata.js";
+const DEBUG_LOG_PATH = process.env.DEBUG_LOG_PATH ?? "/tmp/cockpit-debug.log";
+// Truncate at startup so each subprocess (each new chat session) starts fresh.
+void writeFile(DEBUG_LOG_PATH, `--- session start ${new Date().toISOString()} pid=${process.pid} ---\n`).catch(() => {});
+
+import { STARS, STAR_INDEX, spectralBucket, starRadiusSolar, type Planet, type Star } from "./astrodata.js";
 import {
   MINDS,
   SHIP_CLASS_INFO,
@@ -133,13 +137,16 @@ function getPlayer(galaxy: Galaxy, playerId: string): Player {
 }
 
 function newPlayer(_seed: number, shipClass: ShipClass, mind: MindPersona): Player {
+  // Spawn ~10 AU "above" Sol (1 AU ≈ 1.581e-5 ly) so Sol is visible as a
+  // proper sphere on the first frame instead of having the camera land
+  // inside its photosphere.
   return {
     playerId: randomUUID(),
     shipName: mind.name,
     shipClass,
     mind,
-    position: [0, 0, 0],
-    heading: [0, 1, 0],
+    position: [0, 1.58e-4, 0],
+    heading: [0, 0, -1],
     throttle: 0,
     hoveredId: null,
     targetId: null,
@@ -326,6 +333,11 @@ export function createServer(): McpServer {
               spectralClass: s.spectralClass, spectralType: s.spectralType,
               lumClass: s.lumClass, distanceLy: s.distanceLy,
               hasPlanets: !!(s.planets && s.planets.length),
+              planetCount: s.planets?.length ?? 0,
+              radiusSolar: starRadiusSolar(s),
+              planets: s.planets?.map((p) => ({
+                name: p.name, kind: p.kind, orbitAU: p.orbitAU, massEarths: p.massEarths,
+              })) ?? [],
             })),
             llm: { provider: getProvider(), model: getModelName(), online: hasCredentials() },
             hint: `Open the other panes: open_compendium({gameId, playerId}), open_bridge({gameId, playerId}).`,
@@ -407,9 +419,13 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
-      // Cockpit pushes its full local state including null targetId at 5 Hz.
-      // Skip null/undefined so the captain's warp_to (set on the server)
-      // isn't immediately wiped by the iframe's next sync.
+      // Skip null/undefined fields so the iframe's regular sync doesn't
+      // clobber server-set values (e.g. captain agent calling warp_to
+      // sets player.targetId, which would otherwise be erased on the
+      // iframe's next null-targetId sync). See cockpit/CLAUDE.md issue #2.
+      // Belt-and-suspenders: the cockpit iframe also no longer pushes
+      // targetId or warpEngaged, since those are server-owned (warp_to
+      // is the only setter).
       for (const [k, v] of Object.entries(args.state)) {
         if (v !== null && v !== undefined) (player as Record<string, unknown>)[k] = v;
       }
@@ -787,6 +803,35 @@ export function createServer(): McpServer {
     async () => ({
       content: [{ type: "text", text: JSON.stringify({ kind: "minds", minds: listMinds() }) }],
     }),
+  );
+
+  // --- DEBUG -----------------------------------------------------------
+  // Append-only sink so iframe panes can log to a file we can `tail -f`
+  // without going through Goose Desktop's nested DevTools.
+  registerAppTool(
+    server,
+    "debug_log",
+    {
+      title: "Debug log (server-side sink)",
+      description:
+        "Append a debug message from a pane to the server's debug log file (default /tmp/cockpit-debug.log; override with DEBUG_LOG_PATH env). Dev-only; not for end-user use.",
+      inputSchema: {
+        msg: z.string().min(1).max(2000),
+        kind: z.enum(["info", "warn", "error"]).default("info"),
+        from: z.string().max(40).default("?"),
+      },
+      _meta: { ui: { resourceUri: URI.cockpit } },
+    },
+    async (args) => {
+      const ts = new Date().toISOString();
+      const line = `${ts} [${args.kind ?? "info"}] [${args.from ?? "?"}] ${args.msg}\n`;
+      try {
+        await appendFile(DEBUG_LOG_PATH, line);
+      } catch (e) {
+        console.error("[debug_log] append failed:", e);
+      }
+      return { content: [{ type: "text", text: "ok" }] };
+    },
   );
 
   return server;
