@@ -11,18 +11,52 @@ import * as THREE from "three";
 
 import { callTool, poll, setupPaneApp } from "./shared.js";
 
+type PlanetLite = {
+  name: string;
+  kind: string;            // PlanetKind: terrestrial / super_earth / neptune_like / ice_giant / gas_giant / hot_jupiter / super_jupiter
+  orbitAU?: number;
+  massEarths?: number;
+};
 type StarLite = {
   id: string; name: string; position: [number, number, number];
   spectralClass: string; spectralType: string; lumClass: string;
   distanceLy: number; hasPlanets: boolean;
   radiusSolar?: number;        // for proper-scale sphere rendering at close range
   planetCount?: number;        // shown in nearest list when > 0
+  planets?: PlanetLite[];      // populated when the star has known planets
 };
 
 // Unit conversions used everywhere in the cockpit.
 const LY_PER_AU = 1 / 63241.077;     // 1 ly = 63241 AU
 const SOL_RADIUS_AU = 0.00465047;    // R☉ in AU
 const SOL_RADIUS_LY = SOL_RADIUS_AU * LY_PER_AU;
+const EARTH_RADIUS_AU = 4.26e-5;     // R⊕ in AU
+const EARTH_RADIUS_LY = EARTH_RADIUS_AU * LY_PER_AU;
+
+// Planet rendering uses a "demo cheat" multiplier so they're visible at
+// AU distances. At true scale, Earth from 1 AU subtends 17 arcsec — way
+// below human visual resolution, never visible. 200× makes Earth ~1° at
+// 1 AU, big enough to see and recognize without dominating the system.
+const PLANET_VISUAL_SCALE = 200;
+
+const PLANET_RADIUS_R_EARTH: Record<string, number> = {
+  terrestrial: 0.9,
+  super_earth: 1.5,
+  neptune_like: 3.5,
+  ice_giant: 4.0,
+  gas_giant: 11.0,
+  hot_jupiter: 12.0,
+  super_jupiter: 18.0,
+};
+const PLANET_COLOR: Record<string, number> = {
+  terrestrial:   0x6ba2e0,  // blue (Earth-ish)
+  super_earth:   0xa3743f,  // rust
+  neptune_like:  0x4a7eb8,  // muted blue
+  ice_giant:     0x88d4ee,  // pale cyan
+  gas_giant:     0xd9a36b,  // tan (Jupiter-ish)
+  hot_jupiter:   0xe07b3a,  // bright orange
+  super_jupiter: 0x9c3e2e,  // deep red
+};
 
 // In-system gameplay range. Within this distance of any star, the
 // cockpit auto-throttles to a sub-warp speed so you can actually see
@@ -119,8 +153,33 @@ const closeStarMesh = new THREE.Mesh(
   new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false }),
 );
 closeStarMesh.visible = false;
-closeStarMesh.renderOrder = 5;  // draw on top of fog/sprites
+closeStarMesh.renderOrder = 5;
 scene.add(closeStarMesh);
+
+// Planet mesh pool — sized for the largest catalog system (Sol, 8 planets;
+// TRAPPIST-1 has 7). One geometry shared, one material per slot so we
+// can recolor independently. Hidden when not in a system.
+const PLANET_POOL_SIZE = 12;
+const planetGeom = new THREE.SphereGeometry(1, 24, 16);
+type PlanetSlot = { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial };
+const planetPool: PlanetSlot[] = [];
+for (let i = 0; i < PLANET_POOL_SIZE; i++) {
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false });
+  const mesh = new THREE.Mesh(planetGeom, mat);
+  mesh.visible = false;
+  mesh.renderOrder = 4;
+  scene.add(mesh);
+  planetPool.push({ mesh, mat });
+}
+function hidePlanetPool() {
+  for (const slot of planetPool) if (slot.mesh.visible) slot.mesh.visible = false;
+}
+function planetPhaseSeed(starId: string, planetName: string): number {
+  let h = 0;
+  const s = `${starId}::${planetName}`;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return ((Math.abs(h) % 10000) / 10000) * Math.PI * 2;
+}
 
 // Cosmetic name we keep so the picker code reads cleanly. The actual
 // raycast happens against `warpStars` (bigger pickable area) regardless
@@ -544,16 +603,57 @@ function tick() {
 
   if (closest && closest.dist < BRAKE_RANGE_LY) {
     const distAu = closest.dist / LY_PER_AU;
-    // Render the closest star as a 3D sphere at proper physical scale.
-    // M dwarfs ≈ tiny dots; supergiants like Betelgeuse ≈ 4 AU radius
-    // and visibly fill the sky from 100 AU out.
-    const radiusLy = (closest.star.radiusSolar ?? 1.0) * SOL_RADIUS_LY;
+    // Real radius for proper-scale rendering, BUT also clamp to a
+    // minimum apparent size in pixels so M dwarfs / white dwarfs don't
+    // become subpixel ghosts. Stellar/atlas apps do this to keep tiny
+    // stars findable. Big stars (Betelgeuse) render at true scale
+    // because true scale already exceeds the floor.
+    const trueRadiusLy = (closest.star.radiusSolar ?? 1.0) * SOL_RADIUS_LY;
+    // Min radius = N pixels at this camera distance, given our FOV.
+    // tan(35°) ≈ 0.7, height in pixels from canvas; gives radius such
+    // that the sphere subtends MIN_PX pixels.
+    const MIN_PX = 4;
+    const canvasH = canvas.clientHeight || 600;
+    const minRadiusLy = (MIN_PX * closest.dist * 1.4) / canvasH;
+    const radiusLy = Math.max(trueRadiusLy, minRadiusLy);
     closeStarMesh.position.set(...closest.star.position);
     closeStarMesh.scale.setScalar(radiusLy);
     (closeStarMesh.material as THREE.MeshBasicMaterial).color.setHex(
       spectralColor(closest.star.spectralClass, closest.star.lumClass),
     );
-    closeStarMesh.visible = closest.dist > radiusLy;  // hide if camera is inside the star
+    closeStarMesh.visible = closest.dist > trueRadiusLy;  // hide if camera is inside the star's actual photosphere
+
+    // Planets — render each at its real orbital distance (in AU), with a
+    // "demo cheat" radius scale so they're visible. Slow Kepler-ish phase
+    // animation: inner planets sweep visibly; outer planets crawl. Phase
+    // seeded by (starId, planetName) so each planet sits at a stable
+    // orbital position across reloads.
+    const planets = closest.star.planets ?? [];
+    const tNow = performance.now() / 1000;
+    for (let i = 0; i < PLANET_POOL_SIZE; i++) {
+      const slot = planetPool[i];
+      if (i >= planets.length) {
+        if (slot.mesh.visible) slot.mesh.visible = false;
+        continue;
+      }
+      const p = planets[i];
+      const orbitAU = Math.max(0.005, p.orbitAU ?? 1);
+      const orbitLy = orbitAU * LY_PER_AU;
+      const phaseSeed = planetPhaseSeed(closest.star.id, p.name);
+      // 0.05 / orbitAU rad/s ⇒ Earth orbits in ~2 minutes; clamped to
+      // keep TRAPPIST-1 (orbits at 0.01 AU) from being a blur.
+      const phaseSpeed = Math.min(0.5, 0.05 / orbitAU);
+      const phase = phaseSeed + tNow * phaseSpeed;
+      const sx = closest.star.position[0] + Math.cos(phase) * orbitLy;
+      const sy = closest.star.position[1];                              // all planets on the star's local XZ plane
+      const sz = closest.star.position[2] + Math.sin(phase) * orbitLy;
+      const r = (PLANET_RADIUS_R_EARTH[p.kind] ?? 1) * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
+      slot.mesh.position.set(sx, sy, sz);
+      slot.mesh.scale.setScalar(r);
+      slot.mat.color.setHex(PLANET_COLOR[p.kind] ?? 0xaaaaaa);
+      slot.mesh.visible = true;
+    }
+
     // Autobrake — clamp throttle to a sub-warp value, and disengage
     // autopilot if it was steering us here.
     const cap = maxImpulseThrottle(distAu);
@@ -569,6 +669,7 @@ function tick() {
     }
   } else {
     closeStarMesh.visible = false;
+    hidePlanetPool();
   }
 
   const speed = Math.pow(ship.throttle, 3) * 0.4;
@@ -610,7 +711,7 @@ function updateHud(fwd: THREE.Vector3) {
 
   const ranked = stars
     .map((s) => ({ star: s, dist: new THREE.Vector3(...s.position).distanceTo(ship.position) }))
-    .filter((e) => e.dist > 0.001)
+    .filter((e) => e.dist > 1e-10)  // exclude only the degenerate self-distance case
     .sort((a, b) => a.dist - b.dist);
 
   let hoveredId: string | null = null;

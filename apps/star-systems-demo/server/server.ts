@@ -321,6 +321,9 @@ export function createServer(): McpServer {
               hasPlanets: !!(s.planets && s.planets.length),
               planetCount: s.planets?.length ?? 0,
               radiusSolar: starRadiusSolar(s),
+              planets: s.planets?.map((p) => ({
+                name: p.name, kind: p.kind, orbitAU: p.orbitAU, massEarths: p.massEarths,
+              })) ?? [],
             })),
             llm: { provider: getProvider(), model: getModelName(), online: hasCredentials() },
             hint: `Open the other panes: open_compendium({gameId, playerId}), open_bridge({gameId, playerId}).`,
