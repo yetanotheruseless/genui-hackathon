@@ -1,0 +1,18 @@
+[project]
+name = "a2ui_backend"
+version = "0.1.0"
+description = "A2UI v0.9 protocol adapter over agent_core."
+requires-python = ">=3.11"
+dependencies = [
+    "agent_core",
+    "a2ui-pydantic>=0.1.1",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["a2ui_backend"]

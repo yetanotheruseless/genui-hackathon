@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Dungeon · Controls</title>
+    <style>
+      :root { color-scheme: dark; --bg:#08080d; --line:#2a2d3c; --ink:#c9d2e3; --dim:#6f7689; --accent:#6ee7ff; }
+      * { box-sizing: border-box; }
+      html, body { margin:0; padding:0; height:100%; background:var(--bg); color:var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+      body { display:flex; flex-direction:column; }
+      header { padding:5px 8px; border-bottom:1px solid var(--line); color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.12em; }
+      header span#status { float:right; color:var(--ink); text-transform:none; letter-spacing:0; }
+      #body { flex:1; padding:10px; display:grid; gap:10px; align-content:start; }
+      .row { display:flex; gap:6px; }
+      .row.compass { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:6px; max-width:280px; }
+      .row.compass .empty { visibility:hidden; }
+      button.btn {
+        background:#1a1c28; border:1px solid var(--line); color:var(--ink);
+        padding:8px 10px; border-radius:4px; font:inherit; cursor:pointer;
+        transition: background .1s, border-color .1s;
+      }
+      button.btn:hover { background:#232636; border-color:var(--accent); }
+      button.btn:disabled { opacity:0.4; cursor:not-allowed; }
+      .label { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.1em; padding-bottom:4px; }
+    </style>
+  </head>
+  <body>
+    <header>controls <span id="status">connecting…</span></header>
+    <div id="body">
+      <div class="label">movement</div>
+      <div class="row compass">
+        <span class="empty"></span>
+        <button class="btn" data-action="forward">▲ forward</button>
+        <span class="empty"></span>
+        <button class="btn" data-action="turn-left">↶ turn L</button>
+        <button class="btn" data-action="back">▼ back</button>
+        <button class="btn" data-action="turn-right">↷ turn R</button>
+      </div>
+      <div class="label">actions</div>
+      <div class="row">
+        <button class="btn" data-action="look">👁 look</button>
+        <button class="btn" data-action="listen">👂 listen</button>
+        <button class="btn" data-action="rest">😴 rest</button>
+        <button class="btn" data-action="interact">✋ interact</button>
+      </div>
+    </div>
+    <script type="module" src="/src/controls-main.ts"></script>
+  </body>
+</html>

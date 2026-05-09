@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Lattice MC · MCP App</title>
+    <style>
+      :root { color-scheme: light dark; }
+      html, body { margin: 0; font-family: ui-sans-serif, system-ui, sans-serif; }
+      .panel { padding: 1rem; max-width: 720px; }
+      h1 { font-size: 1rem; margin: 0 0 0.5rem; opacity: 0.7; }
+      .controls { display: grid; grid-template-columns: auto 1fr auto; gap: 0.5rem 0.75rem; align-items: center; margin-bottom: 1rem; }
+      .controls label { font-family: ui-monospace, monospace; font-size: 0.85rem; opacity: 0.75; }
+      .controls input[type=range] { width: 100%; }
+      .controls input[type=number] { width: 6rem; }
+      button { padding: 0.4rem 0.9rem; border-radius: 4px; border: 1px solid #888; background: #0ea5e9; color: white; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: progress; }
+      .summary { font-family: ui-monospace, monospace; font-size: 0.85rem; opacity: 0.85; margin-top: 0.5rem; }
+      svg { background: #fafafa; border: 1px solid #ddd; border-radius: 4px; }
+      @media (prefers-color-scheme: dark) {
+        svg { background: #18181b; border-color: #3f3f46; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <h1>lattice_simulate · live β/steps slider · re-runs over the host bridge</h1>
+      <div class="controls">
+        <label for="beta">β (inv. temp)</label>
+        <input id="beta" type="range" min="0.10" max="1.00" step="0.02" value="0.44" />
+        <span id="beta-val" style="font-family: ui-monospace, monospace; font-size: 0.85rem;">0.44</span>
+
+        <label for="steps">steps</label>
+        <input id="steps" type="number" min="50" max="2000" step="50" value="200" />
+        <button id="run">re-run</button>
+      </div>
+      <svg id="chart" width="640" height="220" viewBox="0 0 640 220"></svg>
+      <div id="summary" class="summary">loading…</div>
+    </div>
+    <script type="module" src="/src/mcp-app.ts"></script>
+  </body>
+</html>

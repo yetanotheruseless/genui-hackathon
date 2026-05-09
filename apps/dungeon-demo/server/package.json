@@ -1,0 +1,41 @@
+{
+  "name": "dungeon-demo-server",
+  "version": "0.2.0",
+  "type": "module",
+  "private": true,
+  "description": "MCP Apps server: 4-iframe dungeon-crawler hosted in Goose desktop. Three.js viewport + narration + stats + controls panes share server-side world state.",
+  "scripts": {
+    "build:viewport": "cross-env INPUT=viewport.html vite build",
+    "build:narration": "cross-env INPUT=narration.html vite build",
+    "build:stats": "cross-env INPUT=stats.html vite build",
+    "build:controls": "cross-env INPUT=controls.html vite build",
+    "build:panes": "npm run build:viewport && npm run build:narration && npm run build:stats && npm run build:controls",
+    "build": "tsc --noEmit && tsc -p tsconfig.server.json && npm run build:panes",
+    "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=viewport.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=narration.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=stats.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=controls.html vite build --watch\" \"tsx watch main.ts\"",
+    "start:stdio": "tsx main.ts --stdio"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.0",
+    "@ai-sdk/google": "^1.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "@modelcontextprotocol/ext-apps": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ai": "^4.3.16",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "three": "^0.170.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.19.5",
+    "@types/three": "^0.170.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.0.0",
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}

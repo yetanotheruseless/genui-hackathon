@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>A2UI demo · genui-hackathon</title>
+    <style>
+      :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+      html, body { margin: 0; padding: 0; height: 100%; }
+      body { display: grid; grid-template-rows: auto 1fr auto; min-height: 100vh; }
+      header { padding: 0.75rem 1.25rem; border-bottom: 1px solid #ccc4; }
+      header h1 { font-size: 1.05rem; margin: 0; }
+      header p { font-size: 0.85rem; opacity: 0.7; margin: 0.25rem 0 0; }
+      main { display: grid; grid-template-columns: 1fr 380px; gap: 0; min-height: 0; }
+      #surfaces { padding: 1.25rem; overflow: auto; display: flex; flex-direction: column; gap: 1rem; }
+      #log { padding: 1rem; background: #0a0a0a; color: #d4d4d4; font: 11px ui-monospace, monospace; overflow: auto; }
+      #log h2 { font: inherit; opacity: 0.5; margin: 0 0 0.5rem; text-transform: uppercase; letter-spacing: 0.08em; }
+      #log pre { margin: 0 0 0.5rem; white-space: pre-wrap; word-break: break-all; }
+      .badge { color: #34d399; }
+      footer { display: flex; gap: 0.5rem; padding: 0.75rem 1.25rem; border-top: 1px solid #ccc4; }
+      footer input { flex: 1; padding: 0.5rem 0.75rem; border: 1px solid #ccc6; border-radius: 4px; background: transparent; color: inherit; font: inherit; }
+      footer button { padding: 0.5rem 1rem; border-radius: 4px; border: 0; background: #0ea5e9; color: white; cursor: pointer; }
+      footer button:disabled { opacity: 0.5; cursor: progress; }
+      a2ui-surface { display: block; padding: 0.5rem 0; border-bottom: 1px dashed #ccc4; }
+      .toolcall { font: 12px ui-monospace, monospace; opacity: 0.7; padding: 0.25rem 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>A2UI · declarative agent-driven UI from a fixed component catalog</h1>
+      <p>apps/a2ui-demo · v0.9 messages · Lit renderer (<code>@a2ui/lit</code>)</p>
+    </header>
+    <main>
+      <section id="surfaces"></section>
+      <aside id="log"><h2>raw A2UI message stream</h2><div id="log-body"></div></aside>
+    </main>
+    <footer>
+      <input id="prompt" type="text" placeholder="ask the agent..." value="Sketch a Coleman-De Luccia bubble nucleation diagram." />
+      <button id="send">send</button>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

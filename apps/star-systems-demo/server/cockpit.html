@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Starship · Cockpit</title>
+    <style>
+      :root { color-scheme: dark; --bg:#04060a; --panel:#0e131c; --line:#202a3d; --ink:#cfd6e6; --dim:#6f7689; --accent:#7ad7ff; --warn:#ffb86b; }
+      * { box-sizing: border-box; }
+      html, body { margin:0; padding:0; height:100%; background:var(--bg); color:var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; overflow:hidden; }
+      body { display:flex; flex-direction:column; }
+      .strip { padding: 4px 8px; border-bottom: 1px solid var(--line); display:flex; gap:10px; align-items:center; }
+      .strip .badge { color:var(--dim); }
+      .strip .accent { color: var(--accent); }
+      .strip .warn { color: var(--warn); }
+      #wrap { flex:1; position:relative; min-height:0; }
+      canvas { display:block; width:100%; height:100%; }
+
+      /* HUD overlays */
+      .reticle { position:absolute; top:50%; left:50%; transform: translate(-50%, -50%); pointer-events:none; }
+      .reticle .ring { width:60px; height:60px; border:1px solid var(--accent); border-radius:50%; opacity:0.7; }
+      .reticle .center { position:absolute; top:50%; left:50%; width:6px; height:6px; transform:translate(-50%,-50%); background:var(--accent); border-radius:50%; box-shadow:0 0 8px var(--accent); }
+      .target-tag { position:absolute; top:calc(50% + 38px); left:50%; transform:translateX(-50%); background:rgba(4,6,10,.75); padding:3px 8px; border:1px solid var(--accent); border-radius:3px; color:var(--accent); white-space:nowrap; pointer-events:none; }
+
+      .hud-bottom { position:absolute; left:0; right:0; bottom:0; padding:6px 10px; display:flex; gap:12px; align-items:center; background:rgba(4,6,10,.75); border-top:1px solid var(--line); }
+      .throttle-wrap { flex:1; display:flex; align-items:center; gap:8px; }
+      .throttle-label { color:var(--dim); width:90px; }
+      .throttle-label .speed { color:var(--accent); font-weight:600; }
+      input[type="range"] {
+        flex:1; accent-color: var(--accent); height: 4px;
+      }
+      .label-block { display:flex; flex-direction:column; line-height:1.3; }
+      .label-block .k { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
+      .label-block .v { color:var(--ink); }
+
+      .nearest { position:absolute; right:8px; top:8px; background:rgba(4,6,10,.75); padding:4px 8px; border:1px solid var(--line); border-radius:3px; max-width:240px; }
+      .nearest h3 { font-size:10px; color:var(--dim); margin:0 0 3px; text-transform:uppercase; letter-spacing:.1em; }
+      .nearest ol { margin:0; padding:0 0 0 18px; font-size:11px; }
+      .nearest ol li { color:var(--ink); }
+      .nearest ol li.target { color:var(--accent); }
+
+      #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; transition:opacity .25s; }
+      #overlay.hidden { opacity:0; }
+      #overlay span { background:rgba(4,6,10,.85); padding:8px 16px; border:1px solid var(--accent); border-radius:4px; color:var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="strip">
+      <span class="badge" id="hud-mind">GCU</span>
+      <span style="color:#ffd28a; font-style:italic; font-weight:600" id="hud-ship">—</span>
+      <span class="badge">·</span>
+      <span class="accent" id="hud-pos">at Sol</span>
+      <span class="badge">·</span>
+      <span id="hud-distance">—</span>
+      <span class="badge">·</span>
+      <span id="hud-target">no target</span>
+      <span class="badge" style="margin-left:auto" id="hud-llm">llm:?</span>
+    </div>
+    <div id="wrap">
+      <canvas id="canvas"></canvas>
+      <div class="reticle"><div class="ring"></div><div class="center"></div></div>
+      <div class="target-tag" id="target-tag" style="display:none"></div>
+      <div class="nearest">
+        <h3>Nearest stars</h3>
+        <ol id="nearest-list"></ol>
+      </div>
+      <div id="overlay"><span>click + drag to look · throttle below · click reticle target to warp · click any star</span></div>
+      <div class="hud-bottom">
+        <div class="throttle-wrap">
+          <div class="throttle-label">throttle <span class="speed" id="speed-readout">0.00 c</span></div>
+          <input type="range" id="throttle" min="0" max="1" step="0.01" value="0" />
+        </div>
+        <div class="label-block"><span class="k">heading</span><span class="v" id="heading-readout">—</span></div>
+        <button id="warp-btn" style="background:#1a2436;color:var(--accent);border:1px solid var(--accent);padding:5px 10px;border-radius:3px;cursor:pointer;font:inherit;">warp</button>
+      </div>
+    </div>
+    <script type="module" src="/src/cockpit-main.ts"></script>
+  </body>
+</html>

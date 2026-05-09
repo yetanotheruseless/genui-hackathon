@@ -1,0 +1,10 @@
+[tool.uv.workspace]
+members = [
+    "packages/agent_core",
+    "apps/agui-demo/backend",
+    "apps/a2ui-demo/backend",
+    "apps/goose-demo/agent_core_mcp",
+]
+
+[tool.uv.sources]
+agent_core = { workspace = true }

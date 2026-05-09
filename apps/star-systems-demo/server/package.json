@@ -1,0 +1,40 @@
+{
+  "name": "star-systems-demo-server",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "MCP Apps server: 1P FTL exploration of the local stellar neighborhood with LLM-narrated celestial bodies. Cockpit + compendium + log panes.",
+  "scripts": {
+    "build:cockpit": "cross-env INPUT=cockpit.html vite build",
+    "build:compendium": "cross-env INPUT=compendium.html vite build",
+    "build:bridge": "cross-env INPUT=bridge.html vite build",
+    "build:panes": "npm run build:cockpit && npm run build:compendium && npm run build:bridge",
+    "build": "tsc --noEmit && tsc -p tsconfig.server.json && npm run build:panes",
+    "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=cockpit.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=compendium.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=bridge.html vite build --watch\" \"tsx watch main.ts\"",
+    "start:stdio": "tsx main.ts --stdio"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.0",
+    "@ai-sdk/google": "^1.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "@modelcontextprotocol/ext-apps": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ai": "^4.3.16",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "three": "^0.170.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.19.5",
+    "@types/three": "^0.170.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^6.0.0",
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}

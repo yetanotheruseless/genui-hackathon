@@ -1,0 +1,7 @@
+# Cached raw HYG download — regenerate with `npx tsx scripts/fetch-hyg.ts`
+.hygdata_v41.csv
+
+# Large generated catalogs — regenerate with the fetch-* scripts.
+# Comment these out if you want to commit them (51 MB + 3 MB respectively).
+hyg.json
+exoplanets.json
