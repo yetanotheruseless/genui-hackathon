@@ -2,19 +2,25 @@ import { create } from "zustand";
 
 export type SlotName = "viewport" | "side" | "bottom" | "captain";
 
+export type MountedSlot = {
+  resourceUri: string;
+  /** The CallToolResult that triggered this mount, forwarded to the iframe via AppBridge.sendToolResult so its `ontoolresult` handler fires with the init payload. */
+  toolResult?: unknown;
+};
+
 export type CockpitState = {
   sessionId: string | null;
   gameId: string | null;
   playerId: string | null;
   /** Latest `get_state` payload from the backend (pushed via WS). */
   gameState: unknown | null;
-  /** Resource URI mounted in each slot. Empty entries render the fallback. */
-  slots: Partial<Record<SlotName, string>>;
+  /** Mount per slot. Empty entries render the fallback. */
+  slots: Partial<Record<SlotName, MountedSlot>>;
 
   setSession: (sessionId: string) => void;
   bindPlayer: (gameId: string, playerId: string) => void;
   setGameState: (state: unknown) => void;
-  mountSlot: (slot: SlotName, resourceUri: string) => void;
+  mountSlot: (slot: SlotName, resourceUri: string, toolResult?: unknown) => void;
   clearSlot: (slot: SlotName) => void;
 };
 
@@ -28,8 +34,8 @@ export const useCockpit = create<CockpitState>((set) => ({
   setSession: (sessionId) => set({ sessionId }),
   bindPlayer: (gameId, playerId) => set({ gameId, playerId }),
   setGameState: (gameState) => set({ gameState }),
-  mountSlot: (slot, resourceUri) =>
-    set((s) => ({ slots: { ...s.slots, [slot]: resourceUri } })),
+  mountSlot: (slot, resourceUri, toolResult) =>
+    set((s) => ({ slots: { ...s.slots, [slot]: { resourceUri, toolResult } } })),
   clearSlot: (slot) =>
     set((s) => {
       const next = { ...s.slots };

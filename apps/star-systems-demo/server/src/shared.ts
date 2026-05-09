@@ -46,8 +46,11 @@ export function setupPaneApp(name: string): PaneApp {
     if (!text) return;
     try {
       const data = JSON.parse(text) as PaneInit;
-      if (typeof data.worldId === "string") {
-        resolveWorld(data.worldId);
+      // `worldId` is the legacy dungeon-demo field; `gameId` is the
+      // star-systems / Culture Contact field. Either resolves the init.
+      const id = data.worldId ?? data.gameId;
+      if (typeof id === "string") {
+        resolveWorld(id);
         resolveInit(data);
       }
     } catch (e) {

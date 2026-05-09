@@ -17,7 +17,7 @@ export function Slot({
   /** If provided, rendered instead of the MCP frame (useful for `captain`). */
   children?: ReactNode;
 }) {
-  const resourceUri = useCockpit((s) => s.slots[name]);
+  const mount = useCockpit((s) => s.slots[name]);
   return (
     <Card className={`flex flex-col overflow-hidden ${className ?? ""}`}>
       <CardHeader className="border-b py-2 px-3 flex-shrink-0">
@@ -28,8 +28,8 @@ export function Slot({
       <CardContent className="flex-1 overflow-hidden p-0">
         {children
           ? children
-          : resourceUri
-          ? <McpAppFrame resourceUri={resourceUri} />
+          : mount
+          ? <McpAppFrame resourceUri={mount.resourceUri} toolResult={mount.toolResult} />
           : (
             <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
               awaiting mount{hint ? ` · ${hint}` : ""}

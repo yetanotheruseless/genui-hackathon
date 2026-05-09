@@ -1,14 +1,48 @@
 import { serve } from "@hono/node-server";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
+// Load repo-root .env. Inline parser because process.loadEnvFile only
+// exists on Node 20.12+ and this repo runs on 20.9.
+function loadEnv(filePath: string): void {
+  if (!fs.existsSync(filePath)) return;
+  const raw = fs.readFileSync(filePath, "utf-8");
+  let count = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq < 0) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let val = trimmed.slice(eq + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (!(key in process.env)) {
+      process.env[key] = val;
+      count++;
+    }
+  }
+  console.log(`[env] loaded ${count} vars from ${filePath}`);
+}
+
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  loadEnv(path.resolve(here, "../../../../.env"));
+}
+
+import { clearCaptainHistory, runCaptainTurn } from "./agent.js";
 import { callTool, getToolUiMeta, readResourceText } from "./mcp-client.js";
 import {
   bindSessionPlayer,
   createSession,
   destroySession,
+  getSession,
   startPolling,
   subscribe,
 } from "./state.js";
@@ -89,17 +123,30 @@ app.get(
             ws.send(JSON.stringify({ type: "state", state: s.state }));
           });
         } else if (msg.type === "captain") {
-          // Captain agent loop wired up in task #8. Acknowledge for now.
-          ws.send(JSON.stringify({
-            type: "captain-token",
-            text: "[captain not yet implemented]",
-          }));
-          ws.send(JSON.stringify({ type: "captain-done" }));
+          const session = getSession(sessionId);
+          if (!session?.gameId || !session?.playerId) {
+            ws.send(JSON.stringify({
+              type: "captain-token",
+              text: "[no vessel spawned yet — call start_starship first]",
+            }));
+            ws.send(JSON.stringify({ type: "captain-done" }));
+            return;
+          }
+          void runCaptainTurn({
+            sessionId,
+            gameId: session.gameId,
+            playerId: session.playerId,
+            message: msg.message,
+            emit: (e) => ws.send(JSON.stringify(e)),
+          });
         }
       },
       onClose: () => {
         unsubscribe?.();
-        if (sessionId) destroySession(sessionId);
+        if (sessionId) {
+          clearCaptainHistory(sessionId);
+          destroySession(sessionId);
+        }
       },
     };
   }),

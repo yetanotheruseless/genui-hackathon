@@ -3,6 +3,37 @@
  *  - Streamable HTTP (default, $PORT or 3030) for basic-host etc.
  *  - stdio (--stdio) for Goose desktop, Claude Desktop, VS Code extensions.
  */
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Load repo-root .env. Inline parser because process.loadEnvFile only
+// exists on Node 20.12+ and this repo runs on 20.9.
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const repoEnv = path.resolve(here, "../../../.env");
+  if (fs.existsSync(repoEnv)) {
+    const raw = fs.readFileSync(repoEnv, "utf-8");
+    let count = 0;
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq < 0) continue;
+      const key = trimmed.slice(0, eq).trim();
+      let val = trimmed.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) {
+        process.env[key] = val;
+        count++;
+      }
+    }
+    console.log(`[env] loaded ${count} vars from ${repoEnv}`);
+  }
+}
+
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";

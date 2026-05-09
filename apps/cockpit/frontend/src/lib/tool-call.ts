@@ -19,7 +19,7 @@ export async function callTool(name: string, args: unknown): Promise<ToolCallRes
   const result = (await r.json()) as ToolCallResult;
   const ui = result._meta?.ui;
   if (ui?.slot && ui?.resourceUri && isSlot(ui.slot)) {
-    useCockpit.getState().mountSlot(ui.slot, ui.resourceUri);
+    useCockpit.getState().mountSlot(ui.slot, ui.resourceUri, result);
   }
   return result;
 }

@@ -1,12 +1,13 @@
 import { useCockpit, type SlotName } from "./store";
 
-type ServerMsg =
+export type ServerMsg =
   | { type: "hello"; sessionId: string }
   | { type: "state"; state: unknown }
-  | { type: "mount"; slot: SlotName; resourceUri: string }
+  | { type: "mount"; slot: SlotName; resourceUri: string; toolResult?: unknown }
   | { type: "captain-token"; text: string }
   | { type: "captain-tool"; name: string; args: unknown; result: unknown }
-  | { type: "captain-done" };
+  | { type: "captain-done" }
+  | { type: "captain-error"; error: string };
 
 const WS_URL = (() => {
   const fromEnv = import.meta.env.VITE_WS_URL;
@@ -45,24 +46,40 @@ function connect() {
   ws.onerror = (e) => console.warn("[ws] error:", e);
 }
 
+type Listener = (msg: ServerMsg) => void;
+const listeners = new Set<Listener>();
+
+export function onWsMessage(fn: Listener): () => void {
+  listeners.add(fn);
+  return () => {
+    listeners.delete(fn);
+  };
+}
+
 function dispatch(msg: ServerMsg) {
   const store = useCockpit.getState();
   switch (msg.type) {
     case "hello":
       store.setSession(msg.sessionId);
-      return;
+      // Backend restarted or first connect — if we already have a player,
+      // re-bind so the new session resumes pushing state.
+      if (store.gameId && store.playerId) {
+        send({ type: "bind", gameId: store.gameId, playerId: store.playerId });
+      }
+      break;
     case "state":
       store.setGameState(msg.state);
-      return;
+      break;
     case "mount":
-      store.mountSlot(msg.slot, msg.resourceUri);
-      return;
+      store.mountSlot(msg.slot, msg.resourceUri, msg.toolResult);
+      break;
     case "captain-token":
     case "captain-tool":
     case "captain-done":
-      // Handled by CaptainChat (task #9). Ignored at the WS layer.
-      return;
+    case "captain-error":
+      break;
   }
+  for (const fn of listeners) fn(msg);
 }
 
 export function send(msg: unknown) {
@@ -72,4 +89,8 @@ export function send(msg: unknown) {
 export function bindWsPlayer(gameId: string, playerId: string) {
   send({ type: "bind", gameId, playerId });
   useCockpit.getState().bindPlayer(gameId, playerId);
+}
+
+export function sendCaptainMessage(message: string) {
+  send({ type: "captain", message });
 }
