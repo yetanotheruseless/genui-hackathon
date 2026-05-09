@@ -72,6 +72,10 @@ type Player = {
   shipName: string;
   shipClass: ShipClass;
   mind: MindPersona;
+  /** Wall-clock ms of last activity. Touched by getPlayer() on every
+   *  tool call that addresses this player. Stale players (idle longer
+   *  than IDLE_REAP_MS) are reaped by a periodic sweep. */
+  lastSeenAt: number;
   position: [number, number, number];
   heading: [number, number, number];
   throttle: number;
@@ -110,6 +114,28 @@ const galaxies = new Map<string, Galaxy>();
 const LOG_CAP = 80;
 const PUBLIC_CAP = 40;
 
+// Idle-player reaper. Players that haven't been touched in IDLE_REAP_MS
+// are removed from their galaxy. Combined with the cockpit's localStorage
+// playerId-stickiness, a tab refresh keeps you alive (it reattaches and
+// touches lastSeenAt before the reap interval), but a closed tab's ghost
+// gets cleaned out automatically. Catches Liam's CLAUDE.md issue #4.
+const IDLE_REAP_MS = 60_000;
+const REAP_INTERVAL_MS = 30_000;
+setInterval(() => {
+  const now = Date.now();
+  let totalReaped = 0;
+  for (const galaxy of galaxies.values()) {
+    for (const [pid, player] of galaxy.players) {
+      if (now - player.lastSeenAt > IDLE_REAP_MS) {
+        galaxy.players.delete(pid);
+        appendEvent(galaxy, "departure", `${player.shipName} drifted out of contact.`);
+        totalReaped++;
+      }
+    }
+  }
+  if (totalReaped > 0) console.log(`[reaper] removed ${totalReaped} idle player(s)`);
+}, REAP_INTERVAL_MS).unref();   // .unref() so the timer doesn't keep node alive on shutdown
+
 function getOrCreateGalaxy(gameId: string | undefined, seed: number): Galaxy {
   if (gameId && galaxies.has(gameId)) return galaxies.get(gameId)!;
   const galaxy: Galaxy = {
@@ -133,18 +159,20 @@ function getGalaxy(gameId: string): Galaxy {
 function getPlayer(galaxy: Galaxy, playerId: string): Player {
   const p = galaxy.players.get(playerId);
   if (!p) throw new Error(`unknown playerId in game ${galaxy.gameId}: ${playerId}`);
+  p.lastSeenAt = Date.now();   // any tool that addresses the player counts as activity
   return p;
 }
 
-function newPlayer(_seed: number, shipClass: ShipClass, mind: MindPersona): Player {
+function newPlayer(_seed: number, shipClass: ShipClass, mind: MindPersona, requestedId?: string): Player {
   // Spawn ~10 AU "above" Sol (1 AU ≈ 1.581e-5 ly) so Sol is visible as a
   // proper sphere on the first frame instead of having the camera land
   // inside its photosphere.
   return {
-    playerId: randomUUID(),
+    playerId: requestedId ?? randomUUID(),
     shipName: mind.name,
     shipClass,
     mind,
+    lastSeenAt: Date.now(),
     position: [0, 1.58e-4, 0],
     heading: [0, 0, -1],
     throttle: 0,
@@ -300,24 +328,43 @@ export function createServer(): McpServer {
           .describe("Hint for ship class. Mind selection may override."),
         mind_id: z.string().optional()
           .describe("Pick a specific Mind by id (see list_minds). Random if omitted."),
+        playerId: z.string().optional().describe(
+          "If provided AND a player with this id already exists in the galaxy, " +
+          "reattach to that player instead of spawning a new one. Lets browser " +
+          "tabs persist their identity across reloads via localStorage."),
       },
       _meta: uiMeta(URI.cockpit),
     },
     async (args) => {
       const galaxy = getOrCreateGalaxy(args.gameId, args.seed);
-      const mind = pickMind(args.seed + galaxy.players.size, args.mind_id);
-      const shipClass = (args.ship_class as ShipClass | undefined) ?? mind.shipClass;
-      const player = newPlayer(args.seed, shipClass, mind);
-      galaxy.players.set(player.playerId, player);
-      appendEvent(galaxy, "arrival", `${player.shipName} arrived in this volume.`);
-      // Auto-discover Sol.
-      recordDiscovery(player, STAR_INDEX.sol);
-      // Welcome line from the Mind.
-      appendLog(player, {
-        kind: "mind_chat",
-        voice: mind.name,
-        text: `Aboard. I'm the ${shipClass} ${mind.name}. Ship telemetry online; ${galaxy.players.size === 1 ? "we have the volume to ourselves" : `${galaxy.players.size - 1} other Culture vessel${galaxy.players.size === 2 ? "" : "s"} sharing the volume`}. Ask me about anything you see, or just point us somewhere and I'll fly.`,
-      });
+      // Reattach path: if the caller passed a playerId and we still have
+      // that player around, reuse it. Cleanest fix for the "reload spawns
+      // a fresh ghost every time" problem.
+      const existing = args.playerId ? galaxy.players.get(args.playerId) : undefined;
+      let player: Player;
+      let mind: MindPersona;
+      let shipClass: ShipClass;
+      let reattached = false;
+      if (existing) {
+        existing.lastSeenAt = Date.now();
+        player = existing;
+        mind = existing.mind;
+        shipClass = existing.shipClass;
+        reattached = true;
+      } else {
+        mind = pickMind(args.seed + galaxy.players.size, args.mind_id);
+        shipClass = (args.ship_class as ShipClass | undefined) ?? mind.shipClass;
+        player = newPlayer(args.seed, shipClass, mind, args.playerId);
+        galaxy.players.set(player.playerId, player);
+        appendEvent(galaxy, "arrival", `${player.shipName} arrived in this volume.`);
+        recordDiscovery(player, STAR_INDEX.sol);
+        appendLog(player, {
+          kind: "mind_chat",
+          voice: mind.name,
+          text: `Aboard. I'm the ${shipClass} ${mind.name}. Ship telemetry online; ${galaxy.players.size === 1 ? "we have the volume to ourselves" : `${galaxy.players.size - 1} other Culture vessel${galaxy.players.size === 2 ? "" : "s"} sharing the volume`}. Ask me about anything you see, or just point us somewhere and I'll fly.`,
+        });
+      }
+      void reattached;  // available if we ever want a different welcome path
       return {
         content: [{
           type: "text",

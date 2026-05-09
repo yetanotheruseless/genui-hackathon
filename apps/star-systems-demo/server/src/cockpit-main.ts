@@ -79,6 +79,8 @@ const hudShip = document.getElementById("hud-ship") as HTMLElement | null;
 const hudMind = document.getElementById("hud-mind") as HTMLElement | null;
 const nearestList = document.getElementById("nearest-list") as HTMLOListElement;
 const nearestPlanetList = document.getElementById("nearest-planet-list") as HTMLOListElement;
+const localPlanetsList = document.getElementById("local-planets-list") as HTMLOListElement;
+const localPlanetsHeader = document.getElementById("local-planets-header") as HTMLElement;
 const targetTag = document.getElementById("target-tag") as HTMLElement;
 const warpOverlayEl = document.getElementById("warp-overlay") as HTMLElement | null;
 const debugLogEl = document.getElementById("debug-log") as HTMLElement | null;
@@ -123,9 +125,14 @@ const observed = new Set<string>();
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x040814);
 scene.fog = new THREE.FogExp2(0x040814, 0.0005);
-const camera = new THREE.PerspectiveCamera(70, 1, 0.001, 5000);
+// Near plane is the smallest world distance we want to render. Planets
+// at sub-AU distances need it tiny (1e-7 ly ≈ 6 light-minutes); the old
+// 0.001 ly (= 63 AU) was clipping everything in-system. Spanning 1e-7
+// → 5000 ly is a 5×10^10 ratio, way past 32-bit depth precision, so we
+// pair it with a logarithmic depth buffer.
+const camera = new THREE.PerspectiveCamera(70, 1, 1e-7, 5000);
 camera.position.set(0, 0, 0);
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
 
 // Two parallel star groups; only one is visible at a time.
 //   `warpStars`    — current size-attenuated big sprites; visible when
@@ -334,12 +341,17 @@ function syncOrbitals(orbitals: any[]) {
 }
 
 function syncOtherShips(others: any[]) {
+  // Pixel-stable sprites: ~5 px on screen regardless of distance. The
+  // earlier sizeAttenuation:true + 0.15 ly scale meant a swarm of dead
+  // demo players (which accumulate per Liam's CLAUDE.md issue #4) would
+  // fill the viewport with green when you flew anywhere near the spawn
+  // point.
   otherShipsGroup.clear();
   for (const o of others) {
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
-      color: 0x88ffd9, sizeAttenuation: true, transparent: true, opacity: 0.9,
+      color: 0x88ffd9, sizeAttenuation: false, transparent: true, opacity: 0.9,
     }));
-    sprite.scale.set(0.15, 0.15, 1);
+    sprite.scale.set(0.008, 0.008, 1);
     sprite.position.set(o.position[0], o.position[1], o.position[2]);
     otherShipsGroup.add(sprite);
   }
@@ -421,20 +433,36 @@ warpBtn.addEventListener("click", () => { if (ship.hoveredId) engageWarp(ship.ho
 // reliably + zero DOM churn at 60Hz.
 const NEAREST_ROWS = 5;
 const NEAREST_PLANET_ROWS = 5;
-function makePool(parent: HTMLOListElement, count: number): HTMLLIElement[] {
+const LOCAL_PLANET_ROWS = 8;            // max for our biggest system (Sol/TRAPPIST-1)
+function makePool(parent: HTMLOListElement, count: number, title: string): HTMLLIElement[] {
   const pool: HTMLLIElement[] = [];
   for (let i = 0; i < count; i++) {
     const li = document.createElement("li");
     li.style.cursor = "pointer";
     li.style.display = "none";
-    li.title = "click to face this star";
+    li.title = title;
     parent.appendChild(li);
     pool.push(li);
   }
   return pool;
 }
-const nearestRowPool = makePool(nearestList, NEAREST_ROWS);
-const nearestPlanetRowPool = makePool(nearestPlanetList, NEAREST_PLANET_ROWS);
+const nearestRowPool = makePool(nearestList, NEAREST_ROWS, "click to face this star");
+const nearestPlanetRowPool = makePool(nearestPlanetList, NEAREST_PLANET_ROWS, "click to face this star");
+const localPlanetRowPool = makePool(localPlanetsList, LOCAL_PLANET_ROWS, "click to face this planet");
+
+// Live planet snapshot, rebuilt each tick when the ship is in-system.
+// updateHud reads from this to populate the "Nearest planets" rows;
+// the rendering loop in tick() also writes here so we don't recompute
+// orbit positions twice per frame.
+type LivePlanet = {
+  id: string;                            // "starId::planetName"
+  name: string;
+  kind: string;
+  starName: string;
+  position: [number, number, number];    // world coords (ly)
+  distFromShip: number;                  // ly
+};
+let currentPlanets: LivePlanet[] = [];
 
 const r = nearestList?.getBoundingClientRect?.();
 dbg(`nearestList found: ${!!nearestList}  rect: ${r?.width.toFixed(0)}x${r?.height.toFixed(0)} @ (${r?.x.toFixed(0)},${r?.y.toFixed(0)})  rows=${nearestRowPool.length}`);
@@ -443,28 +471,38 @@ dbg(`nearestList found: ${!!nearestList}  rect: ${r?.width.toFixed(0)}x${r?.heig
 // and is the right primitive for accessibility (Enter/Space on focus
 // also fires click). pointerdown bubbles too if you prefer instant
 // response — both are wired here.
-function aimAtStarFromRow(t: HTMLElement, kind: "click" | "pointerdown"): boolean {
-  const li = t.closest("li[data-star-id]") as HTMLElement | null;
+/** Resolve a row's `data-aim-target` attribute to a world position and
+ *  set aimTarget. Format: "star:<id>" or "planet:<starId>::<planetName>". */
+function aimAtRowTarget(t: HTMLElement, kind: "click" | "pointerdown"): boolean {
+  const li = t.closest("li[data-aim-target]") as HTMLElement | null;
   if (!li) return false;
-  const starId = li.dataset.starId;
-  if (!starId) return false;
-  const star = stars.find((s) => s.id === starId);
-  if (!star) { dbg(`→ star ${starId} not found in stars[]`, "warn"); return false; }
+  const tag = li.dataset.aimTarget;
+  if (!tag) return false;
+  let position: [number, number, number] | null = null;
+  let label = tag;
+  if (tag.startsWith("star:")) {
+    const star = stars.find((s) => s.id === tag.slice(5));
+    if (star) { position = star.position; label = star.name; }
+  } else if (tag.startsWith("planet:")) {
+    const p = currentPlanets.find((p) => p.id === tag.slice(7));
+    if (p) { position = p.position; label = `${p.name} (${p.starName})`; }
+  }
+  if (!position) { dbg(`→ aim target ${tag} not resolvable`, "warn"); return false; }
   ship.warpEngaged = false;
-  const { targetYaw, targetPitch } = headingTo(star.position, ship.position);
+  const { targetYaw, targetPitch } = headingTo(position, ship.position);
   aimTarget = { yaw: targetYaw, pitch: targetPitch };
-  dbg(`(${kind}) aim → ${star.name}: yaw=${(targetYaw*180/Math.PI).toFixed(1)}° pitch=${(targetPitch*180/Math.PI).toFixed(1)}°`);
+  dbg(`(${kind}) aim → ${label}: yaw=${(targetYaw*180/Math.PI).toFixed(1)}° pitch=${(targetPitch*180/Math.PI).toFixed(1)}°`);
   return true;
 }
 // Delegate on the parent `.nearest` div so clicks on either <ol> work.
 const nearestPanel = nearestList.parentElement!;
 nearestPanel.addEventListener("click", (e) => {
   const t = e.target as HTMLElement;
-  if (aimAtStarFromRow(t, "click")) e.stopPropagation();
+  if (aimAtRowTarget(t, "click")) e.stopPropagation();
 });
 nearestPanel.addEventListener("pointerdown", (e) => {
   const t = e.target as HTMLElement;
-  if (aimAtStarFromRow(t, "pointerdown")) {
+  if (aimAtRowTarget(t, "pointerdown")) {
     e.stopPropagation();
     e.preventDefault();
   }
@@ -630,6 +668,7 @@ function tick() {
     // orbital position across reloads.
     const planets = closest.star.planets ?? [];
     const tNow = performance.now() / 1000;
+    const live: LivePlanet[] = [];   // built once and reused by updateHud
     for (let i = 0; i < PLANET_POOL_SIZE; i++) {
       const slot = planetPool[i];
       if (i >= planets.length) {
@@ -647,12 +686,32 @@ function tick() {
       const sx = closest.star.position[0] + Math.cos(phase) * orbitLy;
       const sy = closest.star.position[1];                              // all planets on the star's local XZ plane
       const sz = closest.star.position[2] + Math.sin(phase) * orbitLy;
-      const r = (PLANET_RADIUS_R_EARTH[p.kind] ?? 1) * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
+      // Same min-pixel-apparent-size trick we use on the close star:
+      // even an Earth-sized planet at 10 AU subtends ~0.5 px, which is
+      // invisible. Clamp to MIN_PLANET_PX so planets are always visible,
+      // letting actual scale dominate when you fly close.
+      const trueR = (PLANET_RADIUS_R_EARTH[p.kind] ?? 1) * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
+      const dxp = sx - ship.position.x;
+      const dyp = sy - ship.position.y;
+      const dzp = sz - ship.position.z;
+      const distFromCam = Math.hypot(dxp, dyp, dzp);
+      const MIN_PLANET_PX = 3;
+      const minR = (MIN_PLANET_PX * distFromCam * 1.4) / (canvas.clientHeight || 600);
+      const r = Math.max(trueR, minR);
       slot.mesh.position.set(sx, sy, sz);
       slot.mesh.scale.setScalar(r);
       slot.mat.color.setHex(PLANET_COLOR[p.kind] ?? 0xaaaaaa);
       slot.mesh.visible = true;
+      live.push({
+        id: `${closest.star.id}::${p.name}`,
+        name: p.name,
+        kind: p.kind,
+        starName: closest.star.name,
+        position: [sx, sy, sz],
+        distFromShip: distFromCam,
+      });
     }
+    currentPlanets = live;
 
     // Autobrake — clamp throttle to a sub-warp value, and disengage
     // autopilot if it was steering us here.
@@ -670,6 +729,7 @@ function tick() {
   } else {
     closeStarMesh.visible = false;
     hidePlanetPool();
+    if (currentPlanets.length) currentPlanets = [];
   }
 
   const speed = Math.pow(ship.throttle, 3) * 0.4;
@@ -766,7 +826,8 @@ function updateHud(fwd: THREE.Vector3) {
     const head = `${star.name} · ${formatDistance(dist)} · ${headingGlyph(yawDelta, pitchDelta, angleRad)}`;
     const html = planetSuffix ? `${head}${planetSuffix}` : head;
     if (li.innerHTML !== html) li.innerHTML = html;
-    if (li.dataset.starId !== star.id) li.dataset.starId = star.id;
+    const aimTag = `star:${star.id}`;
+    if (li.dataset.aimTarget !== aimTag) li.dataset.aimTarget = aimTag;
     const isTarget = star.id === ship.hoveredId;
     if (li.classList.contains("target") !== isTarget) li.classList.toggle("target", isTarget);
     if (li.style.display === "none") li.style.display = "";
@@ -779,7 +840,7 @@ function updateHud(fwd: THREE.Vector3) {
       if (li.style.display !== "none") li.style.display = "none";
       continue;
     }
-    renderRow(li, top[i].star, top[i].dist, true);  // show planet count when present
+    renderRow(li, top[i].star, top[i].dist, true);
   }
 
   const planetRanked = ranked.filter((e) => (e.star.planetCount ?? 0) > 0).slice(0, NEAREST_PLANET_ROWS);
@@ -790,6 +851,41 @@ function updateHud(fwd: THREE.Vector3) {
       continue;
     }
     renderRow(li, planetRanked[i].star, planetRanked[i].dist, true);
+  }
+
+  // ---- Nearest planets (in-system) ----------------------------------
+  // Only visible when we're parked in a system that has known planets.
+  // Each row carries data-aim-target="planet:starId::name" for click-to-face.
+  const showLocal = currentPlanets.length > 0;
+  if (showLocal !== (localPlanetsHeader.style.display !== "none")) {
+    localPlanetsHeader.style.display = showLocal ? "" : "none";
+    localPlanetsList.style.display = showLocal ? "" : "none";
+  }
+  if (showLocal) {
+    const sorted = [...currentPlanets].sort((a, b) => a.distFromShip - b.distFromShip);
+    for (let i = 0; i < LOCAL_PLANET_ROWS; i++) {
+      const li = localPlanetRowPool[i];
+      if (i >= sorted.length) {
+        if (li.style.display !== "none") li.style.display = "none";
+        continue;
+      }
+      const lp = sorted[i];
+      const { targetYaw, targetPitch } = headingTo(lp.position, ship.position);
+      const yawDelta = normalizeAngle(targetYaw - ship.yaw);
+      const pitchDelta = targetPitch - ship.pitch;
+      const dir = new THREE.Vector3(...lp.position).sub(ship.position).normalize();
+      const angleRad = Math.acos(Math.max(-1, Math.min(1, dir.dot(fwd))));
+      const kindShort = lp.kind.replace(/_/g, " ");
+      const html = `${lp.name} · <span class="planets">${kindShort}</span> · ${formatDistance(lp.distFromShip)} · ${headingGlyph(yawDelta, pitchDelta, angleRad)}`;
+      if (li.innerHTML !== html) li.innerHTML = html;
+      const aimTag = `planet:${lp.id}`;
+      if (li.dataset.aimTarget !== aimTag) li.dataset.aimTarget = aimTag;
+      if (li.style.display === "none") li.style.display = "";
+    }
+  } else {
+    for (const li of localPlanetRowPool) {
+      if (li.style.display !== "none") li.style.display = "none";
+    }
   }
 }
 
