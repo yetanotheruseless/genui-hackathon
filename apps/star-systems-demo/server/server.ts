@@ -31,6 +31,7 @@ import { generateText } from "ai";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 import { STARS, STAR_INDEX, spectralBucket, type Planet, type Star } from "./astrodata.js";
@@ -46,7 +47,7 @@ import {
 } from "./culture.js";
 import { generateTyped, getModel, getModelName, getProvider, hasCredentials } from "./llm.js";
 
-const DIST_DIR = path.join(import.meta.dirname, "dist");
+const DIST_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist");
 
 // ---------------------------------------------------------------------------
 // State — split into shared Galaxy and per-player Player.
@@ -235,6 +236,20 @@ const URI = {
   bridge:     "ui://stars/bridge.html",
 } as const;
 
+// Slot hint for MCP Apps hosts that support a fixed multi-pane layout
+// (e.g. apps/cockpit). Goose-desktop ignores this and renders inline.
+const SLOT = {
+  [URI.cockpit]:    "viewport",
+  [URI.compendium]: "side",
+  [URI.bridge]:     "bottom",
+} as const;
+
+type UiResourceUri = (typeof URI)[keyof typeof URI];
+
+function uiMeta(resourceUri: UiResourceUri) {
+  return { ui: { resourceUri, slot: SLOT[resourceUri] } } as const;
+}
+
 async function readResourceHtml(file: string): Promise<string> {
   return fs.readFile(path.join(DIST_DIR, file), "utf-8");
 }
@@ -279,7 +294,7 @@ export function createServer(): McpServer {
         mind_id: z.string().optional()
           .describe("Pick a specific Mind by id (see list_minds). Random if omitted."),
       },
-      _meta: { ui: { resourceUri: URI.cockpit } },
+      _meta: uiMeta(URI.cockpit),
     },
     async (args) => {
       const galaxy = getOrCreateGalaxy(args.gameId, args.seed);
@@ -327,7 +342,7 @@ export function createServer(): McpServer {
       title: "Open the compendium",
       description: "Mount the compendium iframe — discoveries, orbitals, ships sharing the galaxy.",
       inputSchema: { gameId: z.string(), playerId: z.string() },
-      _meta: { ui: { resourceUri: URI.compendium } },
+      _meta: uiMeta(URI.compendium),
     },
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
@@ -352,7 +367,7 @@ export function createServer(): McpServer {
       title: "Open the bridge",
       description: "Mount the chat-with-Mind iframe — Mind-narrated observations + back-and-forth dialogue with your ship.",
       inputSchema: { gameId: z.string(), playerId: z.string() },
-      _meta: { ui: { resourceUri: URI.bridge } },
+      _meta: uiMeta(URI.bridge),
     },
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
@@ -388,7 +403,7 @@ export function createServer(): McpServer {
       title: "Push player state",
       description: "Cockpit pushes its position / throttle / hover / target. Throttle to ~5 Hz.",
       inputSchema: { gameId: z.string(), playerId: z.string(), state: PartialStateSchema },
-      _meta: { ui: { resourceUri: URI.cockpit } },
+      _meta: uiMeta(URI.cockpit),
     },
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
@@ -404,7 +419,7 @@ export function createServer(): McpServer {
       title: "Read player + galaxy state",
       description: "Any pane calls this to refresh. Returns the player's private view (ship, log, compendium) PLUS galaxy view (orbitals, public chat, nearby ships).",
       inputSchema: { gameId: z.string(), playerId: z.string() },
-      _meta: { ui: { resourceUri: URI.compendium } },
+      _meta: uiMeta(URI.compendium),
     },
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
@@ -453,7 +468,7 @@ export function createServer(): McpServer {
         playerId: z.string(),
         objectId: z.string(),
       },
-      _meta: { ui: { resourceUri: URI.cockpit } },
+      _meta: uiMeta(URI.cockpit),
     },
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
@@ -528,7 +543,7 @@ export function createServer(): McpServer {
       description:
         "Set the player's targetId. The cockpit's main loop steers toward it and ramps throttle. On arrival the Mind narrates the system.",
       inputSchema: { gameId: z.string(), playerId: z.string(), objectId: z.string() },
-      _meta: { ui: { resourceUri: URI.cockpit } },
+      _meta: uiMeta(URI.cockpit),
     },
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
@@ -553,7 +568,7 @@ export function createServer(): McpServer {
         playerId: z.string(),
         message: z.string().min(1).max(2000),
       },
-      _meta: { ui: { resourceUri: URI.bridge } },
+      _meta: uiMeta(URI.bridge),
     },
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
@@ -624,7 +639,7 @@ export function createServer(): McpServer {
         parent_star_id: z.string().optional().describe("Star id; if given, the Orbital is anchored near that star instead of the player's current position."),
         ring_radius_ly: z.number().positive().max(1).default(0.001).describe("Cosmetic ring radius in light-years (default 0.001 ≈ 95 AU)."),
       },
-      _meta: { ui: { resourceUri: URI.compendium } },
+      _meta: uiMeta(URI.compendium),
     },
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
@@ -663,7 +678,7 @@ export function createServer(): McpServer {
       title: "List players in this galaxy",
       description: "Returns every Mind currently active in the same gameId — ship name, class, position.",
       inputSchema: { gameId: z.string() },
-      _meta: { ui: { resourceUri: URI.compendium } },
+      _meta: uiMeta(URI.compendium),
     },
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
@@ -696,7 +711,7 @@ export function createServer(): McpServer {
         playerId: z.string(),
         message: z.string().min(1).max(800),
       },
-      _meta: { ui: { resourceUri: URI.compendium } },
+      _meta: uiMeta(URI.compendium),
     },
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
@@ -719,7 +734,7 @@ export function createServer(): McpServer {
       title: "List known stars",
       description: "Returns the catalog (id, name, spectral type, distance from Sol, has-planets).",
       inputSchema: {},
-      _meta: { ui: { resourceUri: URI.cockpit } },
+      _meta: uiMeta(URI.cockpit),
     },
     async () => ({
       content: [{
@@ -742,7 +757,7 @@ export function createServer(): McpServer {
       title: "List available Minds",
       description: "Returns the curated list of Mind personalities the player can spawn with.",
       inputSchema: {},
-      _meta: { ui: { resourceUri: URI.bridge } },
+      _meta: uiMeta(URI.bridge),
     },
     async () => ({
       content: [{ type: "text", text: JSON.stringify({ kind: "minds", minds: listMinds() }) }],
