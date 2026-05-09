@@ -46,8 +46,10 @@ export function setupPaneApp(name: string): PaneApp {
     if (!text) return;
     try {
       const data = JSON.parse(text) as PaneInit;
-      if (typeof data.worldId === "string") {
-        resolveWorld(data.worldId);
+      // Contact extension uses gameId+playerId; legacy worlds use worldId
+      const id = data.worldId ?? data.gameId;
+      if (typeof id === "string") {
+        resolveWorld(id);
         resolveInit(data);
       }
     } catch (e) {

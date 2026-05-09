@@ -32,15 +32,68 @@
       .label-block .k { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
       .label-block .v { color:var(--ink); }
 
-      .nearest { position:absolute; right:8px; top:8px; background:rgba(4,6,10,.75); padding:4px 8px; border:1px solid var(--line); border-radius:3px; max-width:240px; }
+      .nearest { position:absolute; right:8px; top:8px; background:rgba(4,6,10,.75); padding:4px 8px; border:1px solid var(--line); border-radius:3px; max-width:280px; z-index: 10; }
       .nearest h3 { font-size:10px; color:var(--dim); margin:0 0 3px; text-transform:uppercase; letter-spacing:.1em; }
+      .nearest h3 + h3 { margin-top: 6px; }
       .nearest ol { margin:0; padding:0 0 0 18px; font-size:11px; }
-      .nearest ol li { color:var(--ink); }
+      .nearest ol li { color:var(--ink); padding:1px 4px; border-radius:2px; }
+      .nearest ol li:hover { background: rgba(122,215,255,0.12); cursor: pointer; }
+      .nearest .planets { color:#c896ff; margin-left:4px; }
+
+      /* Visible-on-screen event log so we can debug click behavior
+         without opening Goose Desktop's DevTools. Toggle with `~`. */
+      #debug-log {
+        position: absolute;
+        left: 8px; bottom: 80px;
+        max-width: 420px;
+        max-height: 180px;
+        overflow-y: auto;
+        font-family: ui-monospace, monospace;
+        font-size: 10px;
+        line-height: 1.35;
+        background: rgba(4,6,10,0.85);
+        border: 1px solid var(--accent);
+        border-radius: 3px;
+        padding: 4px 6px;
+        color: var(--accent);
+        z-index: 20;
+        pointer-events: none;
+      }
+      #debug-log .row { white-space: pre-wrap; }
+      #debug-log .row.warn { color: var(--warn); }
+      #debug-log.hidden { display: none; }
       .nearest ol li.target { color:var(--accent); }
 
       #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; transition:opacity .25s; }
       #overlay.hidden { opacity:0; }
       #overlay span { background:rgba(4,6,10,.85); padding:8px 16px; border:1px solid var(--accent); border-radius:4px; color:var(--accent); }
+
+      /* Warp-mode shimmer overlay — fades in when ship is at warp speeds.
+         Combines a soft vignette tint with a horizontal-streak repeating
+         gradient that scrolls vertically; cheap, GPU-friendly, reads as
+         "stretched space" without going full Star-Wars hyperspace. */
+      #warp-overlay {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 350ms ease-in-out;
+        background:
+          radial-gradient(ellipse at center, transparent 28%, rgba(122,215,255,0.08) 65%, rgba(156,108,255,0.18) 100%),
+          repeating-linear-gradient(0deg, transparent 0px, transparent 5px, rgba(122,215,255,0.04) 5px, rgba(122,215,255,0.04) 6px);
+        mix-blend-mode: screen;
+        background-size: 100% 100%, 100% 24px;
+        animation: warp-shimmer 0.9s linear infinite;
+        animation-play-state: paused;
+      }
+      #warp-overlay.active {
+        opacity: 1;
+        animation-play-state: running;
+      }
+      @keyframes warp-shimmer {
+        from { background-position: 0 0, 0 0; }
+        to   { background-position: 0 0, 0 -24px; }
+      }
     </style>
   </head>
   <body>
@@ -57,13 +110,17 @@
     </div>
     <div id="wrap">
       <canvas id="canvas"></canvas>
+      <div id="warp-overlay"></div>
       <div class="reticle"><div class="ring"></div><div class="center"></div></div>
       <div class="target-tag" id="target-tag" style="display:none"></div>
       <div class="nearest">
         <h3>Nearest stars</h3>
         <ol id="nearest-list"></ol>
+        <h3>With known planets</h3>
+        <ol id="nearest-planet-list"></ol>
       </div>
       <div id="overlay"><span>click + drag to look · throttle below · click reticle target to warp · click any star</span></div>
+      <div id="debug-log" class="hidden"></div>
       <div class="hud-bottom">
         <div class="throttle-wrap">
           <div class="throttle-label">throttle <span class="speed" id="speed-readout">0.00 c</span></div>

@@ -45,9 +45,38 @@ export type Star = {
   spectralType: string;       // e.g. "G2V"
   distanceLy: number;
   apparentMag?: number;
+  /** Stellar radius in solar radii (R☉). Used for proper-scale sphere rendering at close range. */
+  radiusSolar?: number;
   description: string;        // 1–3 sentences of real facts
   planets?: Planet[];
 };
+
+/** Approximate radius (in R☉) from spectral + luminosity class when an exact value isn't provided. */
+export function approxRadiusSolar(spectralClass: SpectralClass, lumClass: LumClass): number {
+  if (spectralClass === "WD") return 0.01;
+  if (spectralClass === "NS") return 1e-5;
+  if (lumClass === "Ia" || lumClass === "Iab" || lumClass === "Ib") {
+    return spectralClass === "M" || spectralClass === "K" ? 800 : 50;
+  }
+  if (lumClass === "II") return 30;
+  if (lumClass === "III") return 12;
+  if (lumClass === "IV") return 3;
+  // V (main sequence) by spectral class
+  switch (spectralClass) {
+    case "O": return 10;
+    case "B": return 4;
+    case "A": return 1.7;
+    case "F": return 1.3;
+    case "G": return 1.0;
+    case "K": return 0.7;
+    case "M": return 0.3;
+    default: return 1.0;
+  }
+}
+
+export function starRadiusSolar(s: Star): number {
+  return s.radiusSolar ?? approxRadiusSolar(s.spectralClass, s.lumClass);
+}
 
 /**
  * Convert RA (hours), Dec (degrees), distance (ly) → equatorial XYZ.
@@ -72,6 +101,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "G2V",
     distanceLy: 0,
+    radiusSolar: 1.0,
     description: "Our home star. A G2V main-sequence yellow dwarf, ~4.6 Gyr old.",
     planets: [
       { name: "Mercury", kind: "terrestrial", massEarths: 0.055, orbitAU: 0.39 },
@@ -93,6 +123,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "M5.5Ve",
     distanceLy: 4.246,
+    radiusSolar: 0.15,
     description: "Closest star to Sol. A red dwarf flare star with at least three confirmed planets including Proxima b in the habitable zone.",
     planets: [
       { name: "Proxima b", kind: "terrestrial", massEarths: 1.07, orbitAU: 0.0485, notes: "in habitable zone, likely tidally locked" },
@@ -109,6 +140,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "G2V",
     distanceLy: 4.367,
+    radiusSolar: 1.22,
     description: "Sun-like primary of the Alpha Centauri triple system. Slightly more massive and luminous than Sol.",
   },
   {
@@ -120,6 +152,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "K1V",
     distanceLy: 4.367,
+    radiusSolar: 0.86,
     description: "Orange dwarf companion to α Cen A in an ~80-year eccentric orbit.",
   },
   {
@@ -130,6 +163,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "M4.0V",
     distanceLy: 5.96,
+    radiusSolar: 0.2,
     description: "A red dwarf with the highest known proper motion of any star (10.3″/yr). Ancient — ~10 Gyr.",
     planets: [
       { name: "Barnard's Star b", kind: "super_earth", massEarths: 3.23, orbitAU: 0.404, notes: "candidate, 2018 detection later disputed" },
@@ -143,6 +177,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "M6.5V",
     distanceLy: 7.86,
+    radiusSolar: 0.16,
     description: "A faint, very low-mass red dwarf. A flare star that emits frequent X-ray and gamma-ray bursts.",
   },
   {
@@ -153,6 +188,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "M2.0V",
     distanceLy: 8.31,
+    radiusSolar: 0.39,
     description: "A nearby M dwarf with at least two confirmed planets.",
     planets: [
       { name: "Lalande 21185 b", kind: "super_earth", massEarths: 2.69, orbitAU: 0.079 },
@@ -168,6 +204,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "A1V",
     distanceLy: 8.6,
+    radiusSolar: 1.71,
     apparentMag: -1.46,
     description: "Brightest star in Earth's night sky. Twice the mass of Sol, ~25× more luminous.",
   },
@@ -179,6 +216,7 @@ export const STARS: Star[] = [
     lumClass: "VII",
     spectralType: "DA2",
     distanceLy: 8.6,
+    radiusSolar: 0.0084,
     description: "A white dwarf companion to Sirius A — the first ever discovered. About Earth-sized, but the mass of the Sun.",
   },
   {
@@ -189,6 +227,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "M3.5V",
     distanceLy: 9.71,
+    radiusSolar: 0.24,
     description: "A flare star and one of the nearest red dwarfs.",
   },
   {
@@ -200,6 +239,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "K2V",
     distanceLy: 10.5,
+    radiusSolar: 0.74,
     description: "Young (~800 Myr) orange dwarf. Has a debris disk and at least one confirmed Jupiter-mass planet.",
     planets: [
       { name: "Epsilon Eridani b", kind: "gas_giant", massEarths: 247, orbitAU: 3.48, notes: "Jupiter-mass; eccentric orbit" },
@@ -213,6 +253,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "M4V",
     distanceLy: 11.03,
+    radiusSolar: 0.2,
     description: "Quiet red dwarf with a confirmed temperate exoplanet. Drifting toward Sol; will be the closest star in ~71,000 years.",
     planets: [
       { name: "Ross 128 b", kind: "terrestrial", massEarths: 1.4, orbitAU: 0.0496, notes: "likely habitable; receives 1.38× Earth flux" },
@@ -226,6 +267,7 @@ export const STARS: Star[] = [
     lumClass: "IV",
     spectralType: "F5IV-V",
     distanceLy: 11.46,
+    radiusSolar: 2.05,
     apparentMag: 0.34,
     description: "A bright F-type subgiant evolving off the main sequence. ~7× more luminous than Sol.",
   },
@@ -237,6 +279,7 @@ export const STARS: Star[] = [
     lumClass: "VII",
     spectralType: "DQZ",
     distanceLy: 11.46,
+    radiusSolar: 0.012,
     description: "White dwarf companion to Procyon A — about 0.6 M☉ in an Earth-sized package.",
   },
   {
@@ -247,6 +290,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "K5V",
     distanceLy: 11.4,
+    radiusSolar: 0.67,
     description: "First star whose parallax was measured (by Bessel, 1838). Orange dwarf; binary with 61 Cyg B.",
   },
   {
@@ -257,6 +301,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "G8.5V",
     distanceLy: 11.91,
+    radiusSolar: 0.79,
     description: "A nearby Sol-analog with at least four planets, including two near the habitable zone. Older and metal-poor.",
     planets: [
       { name: "Tau Ceti g", kind: "super_earth", massEarths: 1.75, orbitAU: 0.133 },
@@ -273,6 +318,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "M8V",
     distanceLy: 40.66,
+    radiusSolar: 0.12,
     description: "An ultracool red dwarf hosting seven Earth-sized planets — three of them in the habitable zone. The most extensively characterized system after our own.",
     planets: [
       { name: "TRAPPIST-1 b", kind: "terrestrial", massEarths: 1.374, orbitAU: 0.0115 },
@@ -293,6 +339,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "A0V",
     distanceLy: 25.04,
+    radiusSolar: 2.36,
     apparentMag: 0.03,
     description: "Brilliant A-type main-sequence star. Used as photometric standard. Has a debris disk that hints at planet formation.",
   },
@@ -305,6 +352,7 @@ export const STARS: Star[] = [
     lumClass: "V",
     spectralType: "A7V",
     distanceLy: 16.73,
+    radiusSolar: 1.79,
     apparentMag: 0.77,
     description: "Rapidly-rotating A-type star — flattened at the poles by ~22% due to centrifugal effects.",
   },
@@ -317,6 +365,7 @@ export const STARS: Star[] = [
     lumClass: "Iab",
     spectralType: "M2Iab",
     distanceLy: 642.5,
+    radiusSolar: 887,
     apparentMag: 0.42,
     description: "Red supergiant — if placed at Sol's position would extend past Jupiter's orbit. Pulsating; a near-future supernova candidate.",
   },
@@ -329,6 +378,7 @@ export const STARS: Star[] = [
     lumClass: "Ia",
     spectralType: "B8Ia",
     distanceLy: 863.0,
+    radiusSolar: 78,
     apparentMag: 0.13,
     description: "Blue supergiant. ~120,000× the luminosity of Sol; will end its life as a supernova in the next million years or so.",
   },
