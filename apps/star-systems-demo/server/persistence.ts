@@ -1,22 +1,23 @@
 /**
- * SQLite persistence — opt-in via PERSIST_DB env var.
+ * SQLite persistence — on by default, opt-out with PERSIST_DB=off.
  *
- * When PERSIST_DB is set, the server hydrates the in-memory `galaxies`
- * Map from disk at startup and snapshots it back on a fixed interval
- * (and on SIGINT/SIGTERM via main.ts).
+ * Default path: ./data/game.sqlite (relative to server module dir).
+ * Override with PERSIST_DB=/some/path/to.db. Disable entirely with
+ * PERSIST_DB=off (handy for ephemeral runs or hostile filesystems).
  *
  * Strategy: whole-galaxy JSON blob per row, keyed by gameId. Cheap,
  * resilient to schema drift (the Galaxy/Player types own their own
  * shape), and matches the "periodic snapshot" model — there's no
  * per-mutation hot path here. Map<> values round-trip via
  * Object.entries / new Map(...).
- *
- * When PERSIST_DB is unset, every export here no-ops, so the running
- * server is byte-for-byte identical to the pre-persistence build.
  */
 import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const DEFAULT_DB_PATH = path.resolve(HERE, "data", "game.sqlite");
 
 type GalaxyLike = {
   gameId: string;
@@ -31,14 +32,20 @@ type GalaxyLike = {
 let db: Database.Database | null = null;
 
 export function persistenceEnabled(): boolean {
-  return !!process.env.PERSIST_DB;
+  return process.env.PERSIST_DB?.toLowerCase() !== "off";
+}
+
+function dbPath(): string {
+  const v = process.env.PERSIST_DB;
+  if (!v || v.toLowerCase() === "off") return DEFAULT_DB_PATH;
+  return path.resolve(v);
 }
 
 export function openPersistence(): void {
   if (!persistenceEnabled() || db) return;
-  const dbPath = process.env.PERSIST_DB!;
-  fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
-  db = new Database(dbPath);
+  const p = dbPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  db = new Database(p);
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
   db.exec(`
@@ -48,7 +55,7 @@ export function openPersistence(): void {
       updated_at INTEGER NOT NULL
     );
   `);
-  console.log(`[persistence] opened ${dbPath}`);
+  console.log(`[persistence] opened ${p}`);
 }
 
 /** Returns parsed galaxy snapshots ready to be reconstituted into the
