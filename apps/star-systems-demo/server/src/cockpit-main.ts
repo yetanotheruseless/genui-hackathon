@@ -1195,12 +1195,29 @@ function tick() {
   const HALO_PX_RATIO = 3.0;
   const HIDE_MAG = 12;
   const SPIKE_BASE_PX = 28;
+  // Manual behind-camera cull. With sizeAttenuation:false sprites,
+  // Three.js doesn't reliably cull sprites whose world position is
+  // behind the camera — the projected `w` goes negative and the sprite
+  // can render at a screen-space-flipped location, producing a giant
+  // mirrored ghost of e.g. the star you're parked next to. We need to
+  // explicitly hide any sprite whose star is outside the front
+  // hemisphere. The 0.05 dot threshold (~87°) keeps stars visible
+  // right up to the frustum's right/left edges (~60° at typical
+  // aspect ratios) while culling everything farther back.
+  const FRONT_HEMISPHERE_DOT = 0.05;
   for (const layers of starLayers.values()) {
     const ud = layers.core.userData as { absMag: number; spikeScaleFactor: number };
     const sx = layers.core.position.x - ship.position.x;
     const sy = layers.core.position.y - ship.position.y;
     const sz = layers.core.position.z - ship.position.z;
     const d = Math.max(1e-6, Math.hypot(sx, sy, sz));
+    const dotFwd = (sx * fwd.x + sy * fwd.y + sz * fwd.z) / d;
+    if (dotFwd < FRONT_HEMISPHERE_DOT) {
+      if (layers.core.visible)  layers.core.visible  = false;
+      if (layers.halo.visible)  layers.halo.visible  = false;
+      if (layers.spike.visible) layers.spike.visible = false;
+      continue;
+    }
     const mObs = ud.absMag + 5 * Math.log10(d * PC_PER_LY / 10);
 
     if (mObs > HIDE_MAG) {
@@ -1373,18 +1390,19 @@ function tick() {
     }
   }
 
-  // Hide all three sprite layers for whichever star is being drawn as a
-  // sphere — otherwise the halo, sized in world units, balloons to fill
-  // the entire viewport and reads as a giant bright square texture-quad
-  // sitting behind closeStarMesh. Using CLOSE_MESH_RANGE_LY (not
-  // BRAKE_RANGE_LY) so the handoff between sprite and sphere happens at
-  // the same threshold.
+  // Hide the sprite of whichever star is being drawn as a sphere —
+  // otherwise the sprite layers double-render on top of closeStarMesh.
+  // Only sets hide=true for the close-mesh star; leaves everything else
+  // alone so the per-frame sizing loop's visibility decisions
+  // (behind-camera cull, magnitude HIDE_MAG threshold) survive.
   const inSphereHideId = closest && closest.dist < CLOSE_MESH_RANGE_LY ? closest.star.id : null;
-  for (const [id, layers] of starLayers) {
-    const hide = id === inSphereHideId;
-    layers.core.visible = !hide;
-    layers.halo.visible = !hide;
-    layers.spike.visible = !hide;
+  if (inSphereHideId) {
+    const layers = starLayers.get(inSphereHideId);
+    if (layers) {
+      layers.core.visible = false;
+      layers.halo.visible = false;
+      layers.spike.visible = false;
+    }
   }
 
   // System light follows the closest star (only when within BRAKE_RANGE).
