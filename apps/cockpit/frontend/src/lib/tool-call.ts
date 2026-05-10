@@ -6,7 +6,7 @@ export type ToolCallResult = {
   _meta?: { ui?: { resourceUri?: string; slot?: string } };
 };
 
-const SLOT_NAMES: readonly SlotName[] = ["viewport", "side", "bottom", "captain"];
+const SLOT_NAMES: readonly SlotName[] = ["viewport", "side", "bottom"];
 const isSlot = (s: string): s is SlotName => (SLOT_NAMES as readonly string[]).includes(s);
 
 export async function callTool(name: string, args: unknown): Promise<ToolCallResult> {

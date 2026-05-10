@@ -36,20 +36,17 @@ function loadEnv(filePath: string): void {
   loadEnv(path.resolve(here, "../../../../.env"));
 }
 
-import { clearCaptainHistory, runCaptainTurn } from "./agent.js";
 import { callTool, getToolUiMeta, readResourceText } from "./mcp-client.js";
 import {
   bindSessionPlayer,
   createSession,
   destroySession,
-  getSession,
   startPolling,
   subscribe,
 } from "./state.js";
 
 type ClientMessage =
-  | { type: "bind"; gameId: string; playerId: string }
-  | { type: "captain"; message: string };
+  | { type: "bind"; gameId: string; playerId: string };
 
 const app = new Hono();
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app });
@@ -122,29 +119,11 @@ app.get(
           unsubscribe = subscribe(sessionId, (s) => {
             ws.send(JSON.stringify({ type: "state", state: s.state }));
           });
-        } else if (msg.type === "captain") {
-          const session = getSession(sessionId);
-          if (!session?.gameId || !session?.playerId) {
-            ws.send(JSON.stringify({
-              type: "captain-token",
-              text: "[no vessel spawned yet — call start_starship first]",
-            }));
-            ws.send(JSON.stringify({ type: "captain-done" }));
-            return;
-          }
-          void runCaptainTurn({
-            sessionId,
-            gameId: session.gameId,
-            playerId: session.playerId,
-            message: msg.message,
-            emit: (e) => ws.send(JSON.stringify(e)),
-          });
         }
       },
       onClose: () => {
         unsubscribe?.();
         if (sessionId) {
-          clearCaptainHistory(sessionId);
           destroySession(sessionId);
         }
       },

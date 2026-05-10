@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type SlotName = "viewport" | "side" | "bottom" | "captain";
+export type SlotName = "viewport" | "side" | "bottom";
 
 export type MountedSlot = {
   resourceUri: string;
