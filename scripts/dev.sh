@@ -62,8 +62,11 @@ start() {
   # Tear down any previous run so this is idempotent.
   stop >/dev/null 2>&1 || true
 
+  # `npm start` does the right composite thing: tsx-watch the MCP server
+  # AND vite-watch all three iframe panes so edits to cockpit-main.ts
+  # (which bundles into dist/cockpit.html) don't get silently stranded.
   tmux new-session -d -s "$SESSION" -n mcp -c "$REPO/apps/star-systems-demo/server"
-  tmux send-keys  -t "$SESSION:mcp"      "PORT=$MCP_PORT npx tsx main.ts" C-m
+  tmux send-keys  -t "$SESSION:mcp"      "PORT=$MCP_PORT npm start" C-m
 
   tmux new-window -t "$SESSION" -n backend  -c "$REPO/apps/cockpit/backend"
   tmux send-keys  -t "$SESSION:backend"  "PORT=$BACKEND_PORT npm run dev" C-m

@@ -747,10 +747,15 @@ function tick() {
     // the ship inside the cordon.
     const cap = maxImpulseThrottle(distAu);
     if (ship.throttle > cap) {
+      const prev = ship.throttle;
       ship.throttle = cap;
       throttleEl.value = ship.throttle.toString();
+      dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
     }
-    if (ship.warpEngaged) ship.warpEngaged = false;
+    if (ship.warpEngaged) {
+      ship.warpEngaged = false;
+      dbg(`[brake] disengaged warp at ${closest.star.name} (${distAu.toFixed(1)}AU)`);
+    }
     // Auto-observe on first entry into a system (LLM Mind narrates).
     if (!observed.has(closest.star.id) && gameId && playerId) {
       observed.add(closest.star.id);
