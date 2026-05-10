@@ -63,10 +63,16 @@ const PLANET_COLOR: Record<string, number> = {
 
 // In-system gameplay range. Within this distance of any star, the
 // cockpit auto-throttles to a sub-warp speed so you can actually see
-// the system instead of zooming through it. The closest star also gets
-// rendered as a real 3D sphere instead of a sprite.
+// the system instead of zooming through it. The systemLight, planet
+// visibility, and auto-observe trigger off this same threshold.
 const BRAKE_RANGE_AU = 100;
 const BRAKE_RANGE_LY = BRAKE_RANGE_AU * LY_PER_AU;
+// Wider band where the closest star is rendered as a real sphere
+// (closeStarMesh) with min-pixel clamp instead of the sprite. Closes
+// the visible gap between "tiny far sprite" and "in-system planets+
+// sphere" — the sphere shows as a small bright dot at this range and
+// grows smoothly with proximity.
+const CLOSE_MESH_RANGE_LY = 0.1;
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const overlay = document.getElementById("overlay") as HTMLDivElement;
@@ -810,15 +816,17 @@ function tick() {
   const minRadiusForPx = (px: number, d: number) => (px * d * 0.7 * 2) / canvasH;
   const minVisibleRadiusAt = (d: number) => minRadiusForPx(0.3, d);
 
-  // Per-frame three-layer star scaling. Core gets the min-pixel floor;
-  // halo follows core in world units but is hard-capped to a screen
-  // fraction so it can never balloon to full-viewport when you're
-  // sub-AU from a star (which would otherwise read as a giant white
-  // texture-quad behind the close-star sphere). Spike is in pixel units
-  // and fades as the core blooms past a few pixels.
+  // Per-frame three-layer star scaling. Core gets the min-pixel floor
+  // for distant visibility AND a max-pixel cap so it can never grow
+  // larger than ~CORE_MAX_PX on screen — without that cap, a base 0.08 ly
+  // sprite at 0.01 ly distance is 8× the viewport and bloom turns the
+  // whole frame to flat white. Halo follows core in world units, also
+  // capped. Spike is in pixel units and fades as the core blooms past
+  // a few pixels.
   // LOD note: when the catalog grows past ~100 stars this loop is the
   // place to gate the halo + spike behind a visibility / distance test.
   const STAR_MIN_PX = 1.5;
+  const CORE_MAX_PX = 60;             // sprite core hard cap (lets closeStarMesh take over)
   const HALO_RATIO = 7.0;             // halo radius = HALO_RATIO × core radius
   const HALO_MAX_SCREEN_FRAC = 0.18;  // halo angular radius cap (NDC fraction)
   const SPIKE_BASE_PX = 28;           // pixel-size of spike for a G dwarf core
@@ -830,7 +838,8 @@ function tick() {
     const sz = layers.core.position.z - ship.position.z;
     const d = Math.hypot(sx, sy, sz);
     const minR = minRadiusForPx(STAR_MIN_PX, d);
-    const coreR = Math.max(base, minR);
+    const maxR = minRadiusForPx(CORE_MAX_PX, d);
+    const coreR = Math.min(maxR, Math.max(base, minR));
     layers.core.scale.set(coreR, coreR, 1);
     // World radius that subtends HALO_MAX_SCREEN_FRAC of the viewport
     // height at this distance — the cap.
@@ -887,19 +896,20 @@ function tick() {
   }
   currentPlanets = live;
 
-  if (closest && closest.dist < BRAKE_RANGE_LY) {
-    const distAu = closest.dist / LY_PER_AU;
+  // closeStarMesh activates whenever the closest star is within
+  // CLOSE_MESH_RANGE_LY (≈ 0.1 ly, much wider than BRAKE_RANGE_LY).
+  // The min-pixel clamp keeps it visible as a tiny bright dot from far
+  // and lets it grow smoothly as you approach — closes the visible gap
+  // between the sprite and the in-system view.
+  if (closest && closest.dist < CLOSE_MESH_RANGE_LY) {
     // Real radius for proper-scale rendering, BUT also clamp to a
     // minimum apparent size in pixels so M dwarfs / white dwarfs don't
     // become subpixel ghosts. Stellar/atlas apps do this to keep tiny
     // stars findable. Big stars (Betelgeuse) render at true scale
     // because true scale already exceeds the floor.
     const trueRadiusLy = (closest.star.radiusSolar ?? 1.0) * SOL_RADIUS_LY;
-    // Min radius = N pixels at this camera distance, given our FOV.
-    // tan(35°) ≈ 0.7, height in pixels from canvas; gives radius such
-    // that the sphere subtends MIN_PX pixels.
     const MIN_PX = 4;
-    const minRadiusLy = (MIN_PX * closest.dist * 1.4) / canvasH;
+    const minRadiusLy = minRadiusForPx(MIN_PX, closest.dist);
     const radiusLy = Math.max(trueRadiusLy, minRadiusLy);
     closeStarMesh.position.set(...closest.star.position);
     closeStarMesh.scale.setScalar(radiusLy);
@@ -907,9 +917,14 @@ function tick() {
       spectralColor(closest.star.spectralClass, closest.star.lumClass),
     );
     closeStarMesh.visible = closest.dist > trueRadiusLy;  // hide if camera is inside the star's actual photosphere
+  } else {
+    closeStarMesh.visible = false;
+  }
 
-    // Autobrake — clamp throttle to a sub-warp value, and disengage
-    // autopilot if it was steering us here.
+  // Autobrake / observe-on-entry / planet visibility / systemLight stay
+  // gated on the tighter BRAKE_RANGE_LY (≈ 100 AU).
+  if (closest && closest.dist < BRAKE_RANGE_LY) {
+    const distAu = closest.dist / LY_PER_AU;
     const cap = maxImpulseThrottle(distAu);
     if (ship.throttle > cap) {
       ship.throttle = ship.throttle * 0.88 + cap * 0.12;  // smooth deceleration
@@ -921,21 +936,17 @@ function tick() {
       observed.add(closest.star.id);
       void callTool(pane.app, "observe", { gameId, playerId, objectId: closest.star.id });
     }
-  } else {
-    closeStarMesh.visible = false;
   }
 
-  // Hide all three sprite layers for whichever star you're parked at —
-  // otherwise the halo, sized in world units, balloons to fill the
-  // entire viewport and reads as a giant bright square texture-quad
-  // sitting behind closeStarMesh. The trigger is being inside
-  // BRAKE_RANGE, NOT closeStarMesh.visible (which can be false if
-  // you've actually drifted inside the photosphere).
-  // (inSystemStarId is the same value we computed up by the planet loop
-  // for currentPlanets — recomputing here for clarity.)
-  const inSystemHideId = closest && closest.dist < BRAKE_RANGE_LY ? closest.star.id : null;
+  // Hide all three sprite layers for whichever star is being drawn as a
+  // sphere — otherwise the halo, sized in world units, balloons to fill
+  // the entire viewport and reads as a giant bright square texture-quad
+  // sitting behind closeStarMesh. Using CLOSE_MESH_RANGE_LY (not
+  // BRAKE_RANGE_LY) so the handoff between sprite and sphere happens at
+  // the same threshold.
+  const inSphereHideId = closest && closest.dist < CLOSE_MESH_RANGE_LY ? closest.star.id : null;
   for (const [id, layers] of starLayers) {
-    const hide = id === inSystemHideId;
+    const hide = id === inSphereHideId;
     layers.core.visible = !hide;
     layers.halo.visible = !hide;
     layers.spike.visible = !hide;
