@@ -165,9 +165,10 @@ const renderPass = new RenderPass(scene, camera);
 composer.addPass(renderPass);
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(1, 1),  // resized in resize()
-  0.35,   // strength
-  0.3,    // radius
-  0.92,   // threshold — only fully-saturated highlights bloom
+  0.5,    // strength
+  0.32,   // radius
+  0.78,   // threshold — Sol's luminance is ~0.92, so this lets stars
+          // bloom while keeping planet day-sides (~0.5–0.7) below.
 );
 composer.addPass(bloomPass);
 
@@ -219,6 +220,7 @@ const closeStarMesh = new THREE.Mesh(
 closeStarMesh.visible = false;
 closeStarMesh.renderOrder = 5;
 scene.add(closeStarMesh);
+// closeStarHalo is created later, once HALO_TEX has been declared.
 
 // One omni-light that follows whichever star you're parked next to.
 // Cheaper than 21 PointLights affecting every fragment everywhere; the
@@ -323,6 +325,25 @@ function makeOrbitalIconTexture(size = 256): THREE.Texture {
   return tex;
 }
 const ORBITAL_ICON_TEX = makeOrbitalIconTexture(256);
+
+// Halo sprite that always rides with closeStarMesh. Without this, with
+// conservative bloom settings a small unlit-disc star reads exactly
+// like a Lambert-shaded planet (both are spheres). The halo gives every
+// close star an unmistakable "this is a light source" glow that planets
+// can't have — additive, tinted by spectral colour per-frame, sized as
+// a multiple of the close-star sphere radius.
+const closeStarHalo = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: HALO_TEX,
+  color: 0xffffff,
+  sizeAttenuation: true,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  opacity: 0.85,
+}));
+closeStarHalo.visible = false;
+closeStarHalo.renderOrder = 4;
+scene.add(closeStarHalo);
 
 // One planet mesh per known planet across the whole catalog. They're real
 // world-space spheres at fixed physical radius (PLANET_VISUAL_SCALE × real),
@@ -1197,12 +1218,20 @@ function tick() {
     const radiusLy = Math.max(trueRadiusLy, minRadiusLy);
     closeStarMesh.position.set(...closest.star.position);
     closeStarMesh.scale.setScalar(radiusLy);
-    (closeStarMesh.material as THREE.MeshBasicMaterial).color.setHex(
-      spectralColor(closest.star.spectralClass, closest.star.lumClass),
-    );
+    const tint = spectralColor(closest.star.spectralClass, closest.star.lumClass);
+    (closeStarMesh.material as THREE.MeshBasicMaterial).color.setHex(tint);
     closeStarMesh.visible = closest.dist > trueRadiusLy;  // hide if camera is inside the star's actual photosphere
+
+    // Halo follows the mesh: 6× the rendered radius, tinted, additive.
+    // Sized in world units so perspective handles the apparent-size scaling.
+    closeStarHalo.position.set(...closest.star.position);
+    const haloR = radiusLy * 6;
+    closeStarHalo.scale.set(haloR, haloR, 1);
+    (closeStarHalo.material as THREE.SpriteMaterial).color.setHex(tint);
+    closeStarHalo.visible = closeStarMesh.visible;
   } else {
     closeStarMesh.visible = false;
+    closeStarHalo.visible = false;
   }
 
   // Autobrake / observe-on-entry / planet visibility / systemLight stay
