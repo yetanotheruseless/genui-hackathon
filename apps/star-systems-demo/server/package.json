@@ -9,9 +9,10 @@
     "build:compendium": "cross-env INPUT=compendium.html vite build",
     "build:bridge": "cross-env INPUT=bridge.html vite build",
     "build:overview": "cross-env INPUT=overview.html vite build",
-    "build:panes": "npm run build:cockpit && npm run build:compendium && npm run build:bridge && npm run build:overview",
+    "build:lobby": "cross-env INPUT=lobby.html vite build",
+    "build:panes": "npm run build:cockpit && npm run build:compendium && npm run build:bridge && npm run build:overview && npm run build:lobby",
     "build": "tsc --noEmit && tsc -p tsconfig.server.json && npm run build:panes",
-    "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=cockpit.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=compendium.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=bridge.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=overview.html vite build --watch\" \"tsx watch main.ts\"",
+    "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=cockpit.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=compendium.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=bridge.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=overview.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=lobby.html vite build --watch\" \"tsx watch main.ts\"",
     "start:stdio": "tsx main.ts --stdio"
   },
   "dependencies": {
@@ -21,12 +22,14 @@
     "@modelcontextprotocol/ext-apps": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ai": "^4.3.16",
+    "better-sqlite3": "^12.9.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "three": "^0.170.0",
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.0",
     "@types/node": "^22.19.5",

@@ -159,3 +159,8 @@ dist/
 
 # Per-developer Claude Code workspace config
 .claude/
+
+# SQLite persistence (default-on, opt-out via PERSIST_DB=off)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

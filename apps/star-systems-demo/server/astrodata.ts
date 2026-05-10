@@ -79,6 +79,54 @@ export function starRadiusSolar(s: Star): number {
   return s.radiusSolar ?? approxRadiusSolar(s.spectralClass, s.lumClass);
 }
 
+/** Default absolute magnitude (M_V) when one isn't given by spectral
+ *  + luminosity class. Crude lookup; fine for the cockpit's star sprite
+ *  brightness model, which only needs mag-vs-mag-vs-mag ordering plus
+ *  rough scale (a magnitude or two off is invisible in pixel space). */
+function approxAbsMag(spectralClass: SpectralClass, lumClass: LumClass): number {
+  if (spectralClass === "WD") return 12;
+  if (spectralClass === "NS") return 16;
+  if (lumClass === "Ia" || lumClass === "Iab" || lumClass === "Ib") {
+    return spectralClass === "M" || spectralClass === "K" ? -6 : -7;
+  }
+  if (lumClass === "II") return -3;
+  if (lumClass === "III") return 0;
+  if (lumClass === "IV") return 2;
+  // Main sequence (V) by spectral class.
+  switch (spectralClass) {
+    case "O": return -5;
+    case "B": return -1;
+    case "A": return 1.5;
+    case "F": return 3.5;
+    case "G": return 4.85;
+    case "K": return 7;
+    case "M": return 12;
+    case "L": return 18;
+    case "T": return 22;
+    default:  return 5;
+  }
+}
+
+/**
+ * Absolute magnitude (M_V). Computed from the star's apparent magnitude
+ * and distance (where both are known) via M = m − 5·log₁₀(d_pc/10);
+ * Sol is the special case (d=0). Falls back to a class-based default
+ * for entries without `apparentMag`.
+ *
+ * Used by the cockpit to size star sprites in pixels by observed
+ * apparent magnitude at the player's current distance — physical-ish,
+ * bounded by construction, and lets dim red dwarfs be tiny pinpricks
+ * while bright supergiants properly glare from across the catalog.
+ */
+const PC_PER_LY = 1 / 3.2615637967;
+export function starAbsMag(s: Star): number {
+  if (s.id === "sol") return 4.85;
+  if (s.apparentMag != null && s.distanceLy > 0) {
+    return s.apparentMag - 5 * Math.log10(s.distanceLy * PC_PER_LY / 10);
+  }
+  return approxAbsMag(s.spectralClass, s.lumClass);
+}
+
 /**
  * Convert RA (hours), Dec (degrees), distance (ly) → equatorial XYZ.
  */

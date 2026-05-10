@@ -21,11 +21,37 @@ import { generateObject, type LanguageModelV1 } from "ai";
 import { z } from "zod";
 
 const DEFAULTS: Record<string, string> = {
-  anthropic: "claude-haiku-4-5-20251001",
+  anthropic: "claude-opus-4-7",
   openai: "gpt-5.5-mini",
   gemini: "gemini-2.5-flash",
   google: "gemini-2.5-flash",
 };
+
+/**
+ * Models that reject the Anthropic API's `temperature` parameter — Opus
+ * 4.7 returns "temperature is deprecated for this model". The Vercel
+ * `ai` package v4 defaults temperature to 0 (see the package's "TODO v5
+ * remove default 0 for temperature"), so without intervention every
+ * call hits this. We wrap the model and scrub temperature before
+ * doGenerate / doStream forwards it.
+ */
+function isTemperatureSensitive(name: string): boolean {
+  return name.startsWith("claude-opus-4-7") || name.startsWith("claude-sonnet-4-7");
+}
+
+function withoutTemperature(model: LanguageModelV1): LanguageModelV1 {
+  const wrap = <T extends { temperature?: number | undefined }>(opts: T): T =>
+    ({ ...opts, temperature: undefined });
+  return new Proxy(model, {
+    get(target, prop, receiver) {
+      if (prop === "doGenerate" || prop === "doStream") {
+        const fn = (target as unknown as Record<string, (o: unknown) => unknown>)[prop as string];
+        return (opts: { temperature?: number }) => fn.call(target, wrap(opts));
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+}
 
 export function getProvider(): string {
   return (process.env.LLM_PROVIDER ?? "anthropic").toLowerCase();
@@ -40,8 +66,10 @@ export function getModel(): LanguageModelV1 {
   const provider = getProvider();
   const name = getModelName();
   switch (provider) {
-    case "anthropic":
-      return anthropic(name);
+    case "anthropic": {
+      const m = anthropic(name);
+      return isTemperatureSensitive(name) ? withoutTemperature(m) : m;
+    }
     case "openai":
       return openai(name);
     case "gemini":

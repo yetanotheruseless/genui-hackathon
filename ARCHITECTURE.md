@@ -123,7 +123,7 @@ Slot = `bottom`. Polls `get_state` and renders `player.log` as a scrolling conve
 - `mind_chat` — Mind reply to a chat message.
 - `user` — your messages; right-aligned bubble.
 
-Input field calls `talk_to_mind`. The Mind sees the **live ship context** (position, throttle, target, recent observations, compendium summary, nearby vessels, orbitals) plus the last ~10 chat turns each call, and stays in character per the persona system prompt.
+Input field calls `talk_to_mind`. The Mind sees the **live ship context** (position, throttle, target, recent observations, compendium summary, nearby vessels, orbitals) plus the last ~10 chat turns each call, and stays in character per the persona system prompt. The Mind is also the **agent** — see the next section for what makes that non-standard.
 
 ## Compendium iframe (manifest + galaxy)
 
@@ -137,13 +137,77 @@ Slot = `side`. Polls `get_state` and renders:
 
 Has two write affordances: build-orbital input + galaxy-broadcast input.
 
-## Captain pane (native React)
+## Information flow: agent-loop-inside-an-MCP-tool
 
-Slot = `captain`. Not an iframe — a React component talking to the cockpit-backend's agent loop over WebSocket. The captain agent is a **separate** Anthropic call with its own system prompt; it has all 13 MCP tools available and can call them on the player's behalf (`gameId` and `playerId` are auto-injected by the backend before each call).
+This is the most non-standard pattern in the codebase and worth understanding before editing `talk_to_mind`. There are *two* agent surfaces stacked inside one MCP tool call.
 
-Typical agent flow on "warp to TRAPPIST-1": `list_objects → warp_to → observe`. Streams tokens to the chat bubble as it goes.
+When you type "take us to Vega" into the bridge:
 
-Mind voice ≠ Captain voice. The Mind is the ship's personality (Banks personas: *Just Read The Instructions*, *So Much For Subtlety*, etc.), in the bridge pane. The Captain is the agent that drives the game on your behalf, in the captain pane.
+```
+[bridge iframe]
+   │
+   │ pane.app.callServerTool({
+   │   name: "talk_to_mind",
+   │   arguments: { gameId, playerId, message: "take us to Vega" }
+   │ })
+   ▼
+[MCP Apps PostMessage → AppBridge → cockpit-backend → MCP client → star-systems server]
+   │
+   ▼
+[server.ts talk_to_mind handler]
+   1. Reads live ship/galaxy state from the in-memory Map<gameId, Galaxy>.
+   2. Builds the Mind's context block (position, throttle, target,
+      recent observations, compendium, nearby vessels, orbitals, pinned
+      stars).
+   3. Builds a `tools` dict whose execute functions are CLOSURES over
+      this player's record:
+         warp_to:        ({star_id})  => { player.targetId = star_id;
+                                           player.warpEngaged = true; … }
+         find_systems:   (args)       => findSystemsExec(args)
+         pin_star:       ({star_id})  => pinStarExec(player, star_id)
+         build_orbital:  …
+         dock_orbital:   …
+         (etc., 11 tools total)
+   4. Calls Vercel AI SDK:
+         generateText({ model: opus-4-7, system, messages, tools, maxSteps: 5 })
+
+      ┌─── inside generateText (one MCP call, multiple LLM round-trips) ───┐
+      │  Opus sees system + history + user msg + tool descriptions          │
+      │  Opus decides: call warp_to(star_id="vega")                         │
+      │  AI SDK runs the closure → mutates player.targetId / warpEngaged    │
+      │  AI SDK feeds tool_result back to Opus                              │
+      │  Opus writes the text reply ("Engines warm, Vega: A0V…")            │
+      └──────────────────────────────────────────────────────────────────────┘
+
+   5. Append user message + reply to player.log.
+   6. Return reply text via the MCP tool result.
+   ▼
+[bridge iframe gets reply text → renders it in chat scroll]
+```
+
+**Two agent layers stacked:**
+
+1. **Outer (MCP Apps).** From the bridge iframe's perspective, it called *one* tool and got *one* text result back. Pure protocol — the host has no idea anything else happened. This is the contract MCP Apps publishes.
+2. **Inner (Vercel AI SDK).** *Inside* `talk_to_mind`'s execute body we run a multi-step LLM loop with tool-calling. `maxSteps: 5` lets Opus chain a few tools (`find_systems → pin_star → warp_to`) and then narrate, all in one MCP call. The MCP layer never sees these inner steps.
+
+**Why warp shows up in the cockpit pane:** the inner-loop tool closures mutate server-side state directly — `player.targetId = "vega"`. The cockpit iframe is a *separate* iframe with its *own* 200 ms `get_state` poll. On its next tick it reads the new `targetId`/`warpEngaged` and its `tick()` animation loop steers toward Vega. There is **no direct iframe-to-iframe channel**; the server's per-player state is the rendezvous.
+
+**Three independent communication clocks** are running concurrently inside the browser:
+
+| Pane | Mode | Cadence |
+|---|---|---|
+| bridge ↔ server | blocking `talk_to_mind` tool call when you press Send | 3–10 s (mostly the LLM) |
+| cockpit ↔ server | `get_state` poll + `sync_state` push | 200 ms poll, ~5 Hz push |
+| compendium ↔ server | `get_state` poll | 700 ms |
+
+This is why the cockpit's warp ramp-up appears ~200 ms *after* the Mind's text reply lands in the bridge — they're two different polls reading the same updated server state.
+
+**Implication for editing.** If you're adding a new agent capability ("the Mind can build a chain of Orbitals at every system on a route"), you have two choices:
+
+- Add a new bound tool inside `talk_to_mind`'s tools dict — the Mind gains the capability immediately, no other surface knows or cares.
+- Add a new top-level MCP tool via `registerAppTool` — the iframe panes can call it directly, AND you can also expose it to the Mind by listing it inside the `tools` dict.
+
+We do (b) for tools that have UI affordances anyway (`build_orbital`, `pin_star`) and (a) for things that are purely Mind-side decisions.
 
 ## Persona system
 

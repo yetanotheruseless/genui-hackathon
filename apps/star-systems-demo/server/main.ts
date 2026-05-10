@@ -40,7 +40,33 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
 import type { Request, Response } from "express";
-import { createServer } from "./server.js";
+import { createServer, getGalaxies, hydrateGalaxy } from "./server.js";
+import { closePersistence, loadAllGalaxies, openPersistence, persistenceEnabled, snapshotAll } from "./persistence.js";
+
+// Opt-in persistence: only active when PERSIST_DB env var is set.
+// Hydrate must complete before any transport accepts a request, or a
+// freshly-started server could overwrite a saved galaxy with an empty
+// one on its first snapshot.
+const SNAPSHOT_INTERVAL_MS = 5_000;
+let snapshotTimer: NodeJS.Timeout | null = null;
+function initPersistence(): void {
+  if (!persistenceEnabled()) return;
+  openPersistence();
+  // Disk JSON is `unknown`-typed; hydrateGalaxy trusts the shape (we
+  // wrote it ourselves on the previous run).
+  for (const snap of loadAllGalaxies()) hydrateGalaxy(snap as Parameters<typeof hydrateGalaxy>[0]);
+  snapshotTimer = setInterval(() => {
+    try { snapshotAll(getGalaxies()); }
+    catch (e) { console.error("[persistence] snapshot failed:", e); }
+  }, SNAPSHOT_INTERVAL_MS);
+  snapshotTimer.unref();
+}
+function flushPersistence(): void {
+  if (!persistenceEnabled()) return;
+  if (snapshotTimer) clearInterval(snapshotTimer);
+  try { snapshotAll(getGalaxies()); } catch (e) { console.error("[persistence] final snapshot failed:", e); }
+  closePersistence();
+}
 
 async function startHttp(create: () => McpServer): Promise<void> {
   const port = parseInt(process.env.PORT ?? "3030", 10);
@@ -70,15 +96,22 @@ async function startHttp(create: () => McpServer): Promise<void> {
   const httpServer = app.listen(port, () => {
     console.log(`Star-Systems MCP Apps server listening on http://localhost:${port}/mcp`);
   });
-  const shutdown = () => httpServer.close(() => process.exit(0));
+  const shutdown = () => {
+    flushPersistence();
+    httpServer.close(() => process.exit(0));
+  };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 }
 
 async function startStdio(create: () => McpServer): Promise<void> {
+  const shutdown = () => { flushPersistence(); process.exit(0); };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
   await create().connect(new StdioServerTransport());
 }
 
+initPersistence();
 const useStdio = process.argv.includes("--stdio");
 (useStdio ? startStdio : startHttp)(createServer).catch((e) => {
   console.error(e);

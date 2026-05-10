@@ -26,6 +26,7 @@ type StarLite = {
   spectralClass: string; spectralType: string; lumClass: string;
   distanceLy: number; hasPlanets: boolean;
   radiusSolar?: number;        // for proper-scale sphere rendering at close range
+  absMag?: number;             // M_V; used to size sprite halo by observed magnitude
   planetCount?: number;        // shown in nearest list when > 0
   planets?: PlanetLite[];      // populated when the star has known planets
 };
@@ -85,6 +86,12 @@ const PLANET_COLOR: Record<string, number> = {
 // visibility, and auto-observe trigger off this same threshold.
 const BRAKE_RANGE_AU = 100;
 const BRAKE_RANGE_LY = BRAKE_RANGE_AU * LY_PER_AU;
+
+/** Top warp speed in light-years per second.
+ *  speed = throttle³ × WARP_MAX_LY_PER_S, so the slider's lower 60% is
+ *  sub-light / low-warp (precise approaches) and the top spans warps 4–9.
+ *  Picked so an 800-ly trip (Rigel) lands in ~45 s at full throttle. */
+const WARP_MAX_LY_PER_S = 20;
 // Wider band where the closest star is rendered as a real sphere
 // (closeStarMesh) with min-pixel clamp instead of the sprite. Closes
 // the visible gap between "tiny far sprite" and "in-system planets+
@@ -465,9 +472,10 @@ function buildStarMeshes() {
                    : s.spectralClass === "B"  ? 0.16
                    : 0.06;
 
-    // CORE — circular bright disc, additive. White-tinted texture so the
-    // bloom pass reads "saturated highlight" regardless of spectral hue.
-    // Picker still raycasts against this group; userData kept compatible.
+    // CORE — circular bright disc, additive. World-space sizing
+    // (sizeAttenuation:true) so behind-camera sprites get culled by
+    // Three.js automatically. White-tinted so bloom reads "saturated
+    // highlight" regardless of spectral hue.
     const core = new THREE.Sprite(new THREE.SpriteMaterial({
       map: CORE_TEX,
       color: 0xffffff,
@@ -481,9 +489,9 @@ function buildStarMeshes() {
     core.userData = { star: s, baseSize: starSize, isSupergiant };
     warpStars.add(core);
 
-    // HALO — soft Gaussian, tinted by spectral colour. World-space scale
-    // = HALO_RATIO × core (set per-frame). Naturally vanishes at far
-    // distances ⇒ free LOD.
+    // HALO — soft Gaussian, tinted by spectral colour. World-space
+    // scale = HALO_RATIO × core (set per-frame). Naturally vanishes at
+    // far distances ⇒ free LOD.
     const halo = new THREE.Sprite(new THREE.SpriteMaterial({
       map: HALO_TEX,
       color,
@@ -750,16 +758,63 @@ let lastSyncedTargetId: string | null = null;
 // "arriving in a system" actually means you've reached planetary distances.
 const OBSERVE_RANGE_LY = BRAKE_RANGE_LY;
 
-/** Stepped throttle cap by distance to the nearest star, in AU.
- *  Outside 100 AU: full throttle. As we approach, cap tightens so the
- *  ship can't blast past planets in 1/60th of a second. */
+/** Unified deceleration ladder used by BOTH autopilot's target throttle
+ *  and the autobrake's cap, so a warp-into-system run is smooth whether
+ *  the trip is autopilot-driven or you're aiming a star manually.
+ *
+ *  Budget: starting at 1 ly out, the throttles below land you at 1 AU
+ *  in ~20 s under the cubic speed law (speed = throttle³ · 20 ly/s):
+ *    1 ly → 100 AU :  5 s  @ 0.2 ly/s
+ *    100 → 10 AU   :  5 s  through stepped cap (30 / 18 / 6 AU/s)
+ *    10 → 1 AU     : 10 s  through stepped cap (2 / 0.6 AU/s)
+ *
+ *  Caps were derived as cbrt(au_per_sec / 63241 / WARP_MAX_LY_PER_S);
+ *  re-derive if WARP_MAX_LY_PER_S ever changes. */
+function speedCapThrottleByLy(distLy: number): number {
+  if (distLy > 1.0) return 1.0;
+  const distAu = distLy / LY_PER_AU;
+  if (distAu > 100) return 0.215;   // 0.2 ly/s   (cruise→approach)
+  if (distAu > 50)  return 0.0286;  // 30 AU/s
+  if (distAu > 20)  return 0.0242;  // 18 AU/s
+  if (distAu > 10)  return 0.0168;  // 6 AU/s
+  if (distAu > 5)   return 0.0117;  // 2 AU/s
+  if (distAu > 1)   return 0.00782; // 0.6 AU/s
+  return 0.00684;                   // 0.4 AU/s near the photosphere
+}
+
+/** Autobrake cap by distance to the closest star, in AU. Outside the
+ *  brake range (100 AU) full throttle is allowed; inside, the same
+ *  ladder as autopilot so a cruise→approach is smooth and consistent. */
 function maxImpulseThrottle(distAu: number): number {
   if (distAu > 100) return 1.0;
-  if (distAu > 50)  return 0.10;   // ~25 AU/s
-  if (distAu > 20)  return 0.07;   // ~9 AU/s
-  if (distAu > 5)   return 0.04;   // ~1.6 AU/s
-  return 0.025;                    // ~0.4 AU/s near the photosphere
+  return speedCapThrottleByLy(distAu * LY_PER_AU);
 }
+
+/** Looser cap used when the player is clearly DEPARTING a star but
+ *  still inside the INNER_AU cordon — symmetric arrival caps are too
+ *  conservative outbound, where there's no risk of a misaimed yaw
+ *  putting you on a planet. The ladder is shifted up one band so that
+ *  a 1 → 10 AU outbound trip takes ~3s instead of ~9s. */
+function departingImpulseThrottle(distAu: number): number {
+  if (distAu > 5)  return 0.0168;   // 6 AU/s   (vs 2 on approach)
+  if (distAu > 1)  return 0.0117;   // 2 AU/s   (vs 0.6 on approach)
+  return 0.00782;                   // 0.6 AU/s (vs 0.4 near photosphere)
+}
+
+/** Autopilot's target throttle from distance-to-target. At cruise
+ *  range (> 1 ly) we want full warp; closer in we share the brake's
+ *  deceleration ladder so the smoothing converges to the right cap
+ *  band without fighting the brake. */
+function autopilotTargetThrottle(distLy: number): number {
+  if (distLy > 1.0) return 0.95;
+  return speedCapThrottleByLy(distLy);
+}
+
+/** Where the autopilot disengages and parks the ship. Was 100 AU which
+ *  meant warp-to-system stopped at the edge of the cordon; the player
+ *  then had to manually creep in for minutes to actually see anything.
+ *  1 AU drops you at planetary range so the system is right there. */
+const AUTOPILOT_ARRIVAL_LY = 1 * LY_PER_AU;
 
 // User-driven "look at" target. When set, tick() slerps yaw/pitch toward it
 // without changing position or throttle. Cleared by drag, by reaching it,
@@ -1010,10 +1065,13 @@ function tick() {
       ship.yaw   = Math.atan2(newFwd.x, -newFwd.z);
       ship.pitch = Math.asin(Math.max(-1, Math.min(1, newFwd.y)));
       // Orbitals get a much tighter arrival distance than star systems —
-      // the dock_orbital tool requires being within ~0.5 AU, so we
-      // creep in for the last AU instead of sliding to a halt at 100 AU.
-      const arrivalRange = target.isOrbital ? ORBITAL_DOCK_RANGE_LY : OBSERVE_RANGE_LY;
-      const targetThrottle = dist > 1 ? 0.95 : Math.max(0.05, Math.min(0.4, dist * 0.8));
+      // the dock_orbital tool requires being within ~0.5 AU. For stars
+      // we use AUTOPILOT_ARRIVAL_LY (1 AU) so the trip ends at planetary
+      // range, not at the 100-AU edge of the brake cordon (which used
+      // to leave the player a tedious manual creep-in away from
+      // anything visible).
+      const arrivalRange = target.isOrbital ? ORBITAL_DOCK_RANGE_LY : AUTOPILOT_ARRIVAL_LY;
+      const targetThrottle = autopilotTargetThrottle(dist);
       ship.throttle = ship.throttle * 0.85 + targetThrottle * 0.15;
       throttleEl.value = ship.throttle.toString();
       if (dist <= arrivalRange) {
@@ -1056,60 +1114,116 @@ function tick() {
   }
 
   // ---- In-system effects ----
-  // Find the nearest star NOW *and* one frame from now. At max warp we
-  // cover ~420 AU per frame, which is 4× the 100-AU brake range — so a
-  // pure "what's closest right now" check can step right over the cordon
-  // in a single frame. We also evaluate at predicted next-frame position
-  // and trip the brake on whichever sample is closer.
-  const speedNow = Math.pow(ship.throttle, 3) * 0.4;
-  const nextPos = ship.position.clone().addScaledVector(fwd, speedNow * dt);
-  let closest: { star: StarLite; dist: number } | null = null;
+  // Find the closest-point-of-approach (CPA) distance to each star
+  // along the upcoming frame's straight-line segment. At max warp
+  // (20 ly/s) we cover ~20 000 AU per frame, so endpoint sampling
+  // (dNow / dNext) misses stars whose closest approach lies in the
+  // segment interior. CPA is exact for linear motion within a frame.
+  //
+  // Bonus: when we DO trip the brake at high warp we know where on the
+  // segment the star sits, so we can snap ship.position to the
+  // brake-range entry point instead of stopping 12 000 AU short of
+  // the system the player was trying to reach.
+  const speedNow = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
+  const segLen = speedNow * dt;
+  const vSeg = fwd.clone().multiplyScalar(segLen);  // p_next = p_now + vSeg
+  const vSegLenSq = vSeg.lengthSq();
+  let closest: { star: StarLite; dist: number; tCpa: number } | null = null;
   for (const s of stars) {
-    const dx = s.position[0] - ship.position.x;
-    const dy = s.position[1] - ship.position.y;
-    const dz = s.position[2] - ship.position.z;
-    const dNow = Math.hypot(dx, dy, dz);
-    const ndx = s.position[0] - nextPos.x;
-    const ndy = s.position[1] - nextPos.y;
-    const ndz = s.position[2] - nextPos.z;
-    const dNext = Math.hypot(ndx, ndy, ndz);
-    const d = Math.min(dNow, dNext);
-    if (closest === null || d < closest.dist) closest = { star: s, dist: d };
+    const sx = s.position[0] - ship.position.x;
+    const sy = s.position[1] - ship.position.y;
+    const sz = s.position[2] - ship.position.z;
+    const dNow = Math.hypot(sx, sy, sz);
+    let dCpa = dNow;
+    let tCpa = 0;
+    if (vSegLenSq > 1e-30) {
+      // Project (star − p_now) onto vSeg, clamped to [0,1] to stay in segment.
+      const tRaw = (sx * vSeg.x + sy * vSeg.y + sz * vSeg.z) / vSegLenSq;
+      tCpa = Math.max(0, Math.min(1, tRaw));
+      const cx = sx - tCpa * vSeg.x;
+      const cy = sy - tCpa * vSeg.y;
+      const cz = sz - tCpa * vSeg.z;
+      dCpa = Math.hypot(cx, cy, cz);
+    }
+    if (closest === null || dCpa < closest.dist) closest = { star: s, dist: dCpa, tCpa };
   }
 
-  // Autobrake fires HERE (moved up from below the scale block) so the
-  // post-brake throttle is known before we set any visual scales. Using
-  // the pre-brake nextPos prediction above lets us catch fast approaches
-  // even when a single frame would step over the cordon.
+  // Autobrake fires HERE (early in tick, right after closest finder)
+  // so the post-brake throttle is known before any visual scale calcs.
+  // The CPA/lookahead in `closest` lets us catch fast approaches that
+  // would otherwise step over the cordon in a single frame.
+  //
+  // Departure pass-through: outside the inner ~10 AU AND clearly heading
+  // away (radialDot < threshold), we DON'T brake — lets you ramp back
+  // to full warp the moment you've cleared a planetary system instead
+  // of crawling out to 100 AU at 0.025 throttle. Inside INNER_AU we
+  // always brake (planets live there; a misaimed yaw could put you on
+  // top of Earth before you noticed).
+  //
+  // We DO NOT disengage warp here. Autopilot shares maxImpulseThrottle
+  // via autopilotTargetThrottle — when brake fires for the autopilot's
+  // target star they agree on throttle and the autopilot rides smoothly
+  // all the way down to AUTOPILOT_ARRIVAL_LY (1 AU). Autopilot itself
+  // clears warpEngaged on arrival; brake just bounds speed.
+  const INNER_AU = 10;
+  const DEPARTING_DOT_THRESHOLD = -0.2;   // ~cos(101°): clearly off-axis
   if (closest && closest.dist < BRAKE_RANGE_LY) {
     const distAu = closest.dist / LY_PER_AU;
-    // Hard SNAP rather than smooth — the cubic speed law (s = throttle³·0.4)
-    // means a smoothed ramp from 1.0 to 0.025 takes ~10 frames, during which
-    // we'd cover 2000+ AU and fly clean through the system.
-    const cap = maxImpulseThrottle(distAu);
-    if (ship.throttle > cap) {
-      const prev = ship.throttle;
-      ship.throttle = cap;
-      throttleEl.value = ship.throttle.toString();
-      dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
+    const dxNow = closest.star.position[0] - ship.position.x;
+    const dyNow = closest.star.position[1] - ship.position.y;
+    const dzNow = closest.star.position[2] - ship.position.z;
+    const dNow = Math.hypot(dxNow, dyNow, dzNow);
+    const radialDot = dNow > 0 ? (dxNow * fwd.x + dyNow * fwd.y + dzNow * fwd.z) / dNow : 0;
+    const departing = radialDot < DEPARTING_DOT_THRESHOLD;
+    const insideInner = distAu < INNER_AU;
+    const shouldBrake = insideInner || !departing;
+    if (shouldBrake) {
+      // Inside-INNER and departing: looser cap so the player can
+      // accelerate outward without the slow arrival ladder dominating.
+      // Otherwise (approaching, or sideways, or yet farther in): the
+      // symmetric arrival cap.
+      const cap = (insideInner && departing)
+        ? departingImpulseThrottle(distAu)
+        : maxImpulseThrottle(distAu);
+      if (ship.throttle > cap) {
+        const prev = ship.throttle;
+        ship.throttle = cap;
+        throttleEl.value = ship.throttle.toString();
+        dbg(`[brake${insideInner && departing ? "↑" : ""}] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
+      }
+      // Snap-to-entry: if we crossed the brake boundary mid-segment
+      // (CPA happens at t > 0 from current position), warp the ship
+      // forward to where we'd cross the 100-AU boundary. Without this
+      // a Sol→Rigel flight that grazes another star's brake range
+      // stops 12 000+ AU short of the system the brake was for.
+      if (closest.tCpa > 0 && dNow > BRAKE_RANGE_LY && segLen > 0) {
+        const sDotV = dxNow * vSeg.x + dyNow * vSeg.y + dzNow * vSeg.z;
+        const sLenSq = dxNow * dxNow + dyNow * dyNow + dzNow * dzNow;
+        const a = vSegLenSq;
+        const b = -2 * sDotV;
+        const c = sLenSq - BRAKE_RANGE_LY * BRAKE_RANGE_LY;
+        const disc = b * b - 4 * a * c;
+        if (disc >= 0) {
+          const tEntry = Math.max(0, Math.min(1, (-b - Math.sqrt(disc)) / (2 * a)));
+          ship.position.addScaledVector(vSeg, tEntry);
+          dbg(`[brake] snap to entry of ${closest.star.name} (t=${tEntry.toFixed(3)} of segment, ${(segLen * tEntry).toFixed(3)}ly)`);
+        }
+      }
     }
-    if (ship.warpEngaged) {
-      ship.warpEngaged = false;
-      dbg(`[brake] disengaged warp at ${closest.star.name} (${distAu.toFixed(1)}AU)`);
-    }
+    // Auto-observe on first entry into a system. Fires regardless of
+    // departing status — flying through still counts as observing.
     if (!observed.has(closest.star.id) && gameId && playerId) {
       observed.add(closest.star.id);
       void callTool(pane.app, "observe", { gameId, playerId, objectId: closest.star.id });
     }
   }
 
-  // Re-derive closest.dist using the POST-brake speed so all the scale
-  // calcs below see the distance the camera will actually be at when
-  // we render. Without this, when the user pushes throttle while in
-  // brake range, scale assumes the pre-brake (longer) movement and the
-  // body visibly shrinks for one frame each time autobrake clamps.
+  // Re-derive closest.dist using the POST-brake speed (and POST-snap
+  // position) so all the scale calcs below see the distance the camera
+  // will actually be at when we render. Without this, when autobrake
+  // clamps throttle the body visibly shrinks for one frame each time.
   if (closest) {
-    const speedFinal = Math.pow(ship.throttle, 3) * 0.4;
+    const speedFinal = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
     const fx = fwd.x * speedFinal * dt;
     const fy = fwd.y * speedFinal * dt;
     const fz = fwd.z * speedFinal * dt;
@@ -1124,9 +1238,9 @@ function tick() {
   // than ~0.3 px — saves draw calls for the ~25 planets in the catalog.
   const tNow = performance.now() / 1000;
   const canvasH = canvas.clientHeight || 600;
-  // Minimum world-radius that subtends N px at distance d, given a 70°
-  // vertical FOV (tan(35°) ≈ 0.7). Used as a floor so distant stars stay
-  // visible without dominating the view.
+  // Geometry helpers — minimum world-space radius that subtends N px at
+  // a given distance, given the 70° vertical FOV (tan(35°) ≈ 0.7). Used
+  // by planet visibility culling and the close-mesh sphere min-radius.
   const minRadiusForPx = (px: number, d: number) => (px * d * 0.7 * 2) / canvasH;
   const minVisibleRadiusAt = (d: number) => minRadiusForPx(0.3, d);
 
@@ -1137,8 +1251,12 @@ function tick() {
   // whole frame to flat white. Halo follows core in world units, also
   // capped. Spike is in pixel units and fades as the core blooms past
   // a few pixels.
-  // LOD note: when the catalog grows past ~100 stars this loop is the
-  // place to gate the halo + spike behind a visibility / distance test.
+  //
+  // sizeAttenuation:true (world-space) for core+halo means Three.js
+  // handles behind-camera culling automatically — we don't need a
+  // manual front-hemisphere check the way the briefly-tried pixel-
+  // stable approach did (that's where the mirrored-ghost-of-Vega-when-
+  // looking-away artifact came from).
   const STAR_MIN_PX = 1.5;
   const CORE_MAX_PX = 60;             // sprite core hard cap (lets closeStarMesh take over)
   const HALO_RATIO = STAR_HALO_RATIO;             // shared with closeStarMesh halo
@@ -1246,18 +1364,19 @@ function tick() {
   // (Autobrake + observe were here — now hoisted up to before the scale
   // calcs, see the BRAKE_RANGE block right after the closest finder.)
 
-  // Hide all three sprite layers for whichever star is being drawn as a
-  // sphere — otherwise the halo, sized in world units, balloons to fill
-  // the entire viewport and reads as a giant bright square texture-quad
-  // sitting behind closeStarMesh. Using CLOSE_MESH_RANGE_LY (not
-  // BRAKE_RANGE_LY) so the handoff between sprite and sphere happens at
-  // the same threshold.
+  // Hide the sprite of whichever star is being drawn as a sphere —
+  // otherwise the sprite layers double-render on top of closeStarMesh.
+  // Only sets hide=true for the close-mesh star; leaves everything else
+  // alone so the per-frame sizing loop's visibility decisions
+  // (behind-camera cull, magnitude HIDE_MAG threshold) survive.
   const inSphereHideId = closest && closest.dist < CLOSE_MESH_RANGE_LY ? closest.star.id : null;
-  for (const [id, layers] of starLayers) {
-    const hide = id === inSphereHideId;
-    layers.core.visible = !hide;
-    layers.halo.visible = !hide;
-    layers.spike.visible = !hide;
+  if (inSphereHideId) {
+    const layers = starLayers.get(inSphereHideId);
+    if (layers) {
+      layers.core.visible = false;
+      layers.halo.visible = false;
+      layers.spike.visible = false;
+    }
   }
 
   // System light follows the closest star (only when within BRAKE_RANGE).
@@ -1326,7 +1445,7 @@ function tick() {
     layers.icon.scale.set(r, r, 1);
   }
 
-  const speed = Math.pow(ship.throttle, 3) * 0.4;
+  const speed = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
   if (speed > 0) ship.position.addScaledVector(fwd, speed * dt);
 
   camera.position.copy(ship.position);
@@ -1343,11 +1462,14 @@ function tick() {
 }
 
 function updateHud(fwd: THREE.Vector3) {
-  const speed = Math.pow(ship.throttle, 3) * 0.4;
+  const speed = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
+  // Display: log scale across the new ~0.005…20 ly/s range. Calibrated
+  // so the impulse/warp boundary is at 0.005 ly/s (warp 1) and full
+  // throttle reads warp 9. 2.22 ≈ 8 / log10(20/0.005).
   const fmt = (s: number) => {
     if (s < 0.005) return `impulse ${(s * 200).toFixed(2)}c`;
-    if (s < 0.1)   return `warp ${Math.max(1, Math.round(s * 20))}`;
-    return `warp ${Math.min(9, Math.round(2 + Math.log2(Math.max(1, s * 10))))}`;
+    const warp = Math.min(9, Math.max(1, 1 + 2.22 * Math.log10(s / 0.005)));
+    return `warp ${Math.round(warp)}`;
   };
   speedReadout.textContent = fmt(speed);
   // Compass bearing (0–360°) + elevation (−90..+90°). Bearing is yaw
@@ -1363,7 +1485,10 @@ function updateHud(fwd: THREE.Vector3) {
 
   // Top-strip target / distance readouts. The nearest-stars/planets
   // panels were moved to the Overview iframe — see SideArea in the
-  // cockpit frontend.
+  // cockpit frontend. The "hover-tooltip on the centered reticle" from
+  // the upstream feature branch isn't reproduced here either, since the
+  // centered reticle was replaced by the locked-target reticle (which
+  // shows its own label) — hover info is in the Overview now.
   const tgt = resolveTargetPosition(ship.targetId);
   hudTarget.textContent = ship.targetId
     ? `target: ${tgt?.name ?? "?"}${tgt?.isOrbital ? " ⟜" : ""} ${ship.warpEngaged ? "(warping)" : ""}`

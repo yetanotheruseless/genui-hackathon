@@ -68,6 +68,13 @@ start() {
   tmux new-session -d -s "$SESSION" -n mcp -c "$REPO/apps/star-systems-demo/server"
   tmux send-keys  -t "$SESSION:mcp"      "PORT=$MCP_PORT npm start" C-m
 
+  # Wait for the MCP server to be reachable BEFORE starting the cockpit
+  # backend, because the backend's MCP client connects once at startup
+  # and doesn't auto-reconnect — racing it against `npm start` means
+  # ECONNREFUSED leaves it permanently broken until manually bounced.
+  echo "waiting for MCP (:$MCP_PORT)…"
+  wait_port "$MCP_PORT" "mcp" || true
+
   tmux new-window -t "$SESSION" -n backend  -c "$REPO/apps/cockpit/backend"
   tmux send-keys  -t "$SESSION:backend"  "PORT=$BACKEND_PORT npm run dev" C-m
 
@@ -75,7 +82,6 @@ start() {
   tmux send-keys  -t "$SESSION:frontend" "npm run dev" C-m
 
   echo "starting…"
-  wait_port "$MCP_PORT"      "mcp"      || true
   wait_port "$BACKEND_PORT"  "backend"  || true
   wait_port "$FRONTEND_PORT" "frontend" || true
   echo

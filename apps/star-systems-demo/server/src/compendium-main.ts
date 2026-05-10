@@ -25,6 +25,31 @@ const buildBtn = $("build-btn") as HTMLButtonElement;
 const publicInput = $("public-input") as HTMLInputElement;
 const publicBtn = $("public-btn") as HTMLButtonElement;
 
+// Collapsible "Stellar bodies / Planet types" header. Hidden state
+// persisted per-browser so the player's preferred layout sticks across
+// reloads — these counters are useful at session start, less so once
+// the Discovered Systems / Orbitals lists have grown long.
+{
+  const toggle = $("counts-toggle");
+  const section = $("counts-section");
+  const STORAGE_KEY = "compendium.countsCollapsed";
+  const apply = (collapsed: boolean) => {
+    toggle.classList.toggle("collapsed", collapsed);
+    section.classList.toggle("collapsed", collapsed);
+    toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  };
+  apply(localStorage.getItem(STORAGE_KEY) === "1");
+  const flip = () => {
+    const next = !toggle.classList.contains("collapsed");
+    localStorage.setItem(STORAGE_KEY, next ? "1" : "0");
+    apply(next);
+  };
+  toggle.addEventListener("click", flip);
+  toggle.addEventListener("keydown", (e) => {
+    if ((e as KeyboardEvent).key === "Enter" || (e as KeyboardEvent).key === " ") { e.preventDefault(); flip(); }
+  });
+}
+
 // Last-known docked orbital id from get_state polling. Drives the
 // per-row "leave" button + the "docked" highlight class.
 let dockedOrbitalId: string | null = null;

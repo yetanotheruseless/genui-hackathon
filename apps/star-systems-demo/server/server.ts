@@ -38,7 +38,7 @@ const DEBUG_LOG_PATH = process.env.DEBUG_LOG_PATH ?? "/tmp/cockpit-debug.log";
 // Truncate at startup so each subprocess (each new chat session) starts fresh.
 void writeFile(DEBUG_LOG_PATH, `--- session start ${new Date().toISOString()} pid=${process.pid} ---\n`).catch(() => {});
 
-import { STARS, STAR_INDEX, spectralBucket, starRadiusSolar, type Planet, type PlanetKind, type SpectralClass, type Star } from "./astrodata.js";
+import { STARS, STAR_INDEX, spectralBucket, starAbsMag, starRadiusSolar, type Planet, type PlanetKind, type SpectralClass, type Star } from "./astrodata.js";
 import {
   MINDS,
   SHIP_CLASS_INFO,
@@ -51,7 +51,9 @@ import {
   type ShipClass,
 } from "./culture.js";
 import {
+  CHUNK_SIZE_LY,
   findSystems,
+  getChunk,
   loadFullCatalog,
   type CatalogStar,
   type FullCatalog,
@@ -204,6 +206,9 @@ type PublicMessage = { id: string; fromPlayerId: string; fromShipName: string; t
 type Galaxy = {
   gameId: string;
   seed: number;
+  /** Wall-clock timestamp of first creation (ms). Used by the lobby to
+   *  sort the games list and show "created N minutes ago". */
+  createdAt: number;
   players: Map<string, Player>;
   orbitals: Orbital[];
   publicChat: PublicMessage[];
@@ -212,6 +217,38 @@ type Galaxy = {
 };
 
 const galaxies = new Map<string, Galaxy>();
+
+/** Exposed to main.ts for the (opt-in) SQLite snapshot loop. Same Map
+ *  the server mutates — no copy, no sync. */
+export function getGalaxies(): Map<string, Galaxy> {
+  return galaxies;
+}
+
+/** Reconstitute a galaxy snapshot from disk. Called once at startup,
+ *  before any tool can run. */
+export function hydrateGalaxy(snap: {
+  gameId: string;
+  seed: number;
+  createdAt?: number;
+  players: Record<string, Player>;
+  orbitals: Orbital[];
+  publicChat: PublicMessage[];
+  events: { id: string; kind: string; text: string; ts: number }[];
+}): void {
+  if (galaxies.has(snap.gameId)) return;
+  galaxies.set(snap.gameId, {
+    gameId: snap.gameId,
+    seed: snap.seed,
+    // Backfill for snapshots predating createdAt (use earliest event ts
+    // as a best-effort proxy, falling back to "now").
+    createdAt: snap.createdAt ?? snap.events?.[0]?.ts ?? Date.now(),
+    players: new Map(Object.entries(snap.players ?? {})),
+    orbitals: snap.orbitals ?? [],
+    publicChat: snap.publicChat ?? [],
+    events: snap.events ?? [],
+  });
+}
+
 const LOG_CAP = 80;
 const PUBLIC_CAP = 40;
 
@@ -248,6 +285,7 @@ function getOrCreateGalaxy(gameId: string | undefined, seed: number): Galaxy {
   const galaxy: Galaxy = {
     gameId: gameId ?? randomUUID(),
     seed,
+    createdAt: Date.now(),
     players: new Map(),
     orbitals: [],
     publicChat: [],
@@ -467,6 +505,26 @@ function clearPinnedExec(player: Player) {
   return { kind: "cleared", removed: n };
 }
 
+/** Wire-format star: matches the cockpit's StarLite shape so chunk
+ *  results plug straight into the existing rendering pipeline. */
+function leanStar(s: CatalogStar | Star) {
+  return {
+    id: s.id,
+    name: s.name,
+    position: s.position,
+    spectralClass: s.spectralClass,
+    spectralType: s.spectralType,
+    lumClass: s.lumClass,
+    distanceLy: ("distanceLy" in s && typeof s.distanceLy === "number") ? s.distanceLy : 0,
+    hasPlanets: !!(s.planets && s.planets.length),
+    planetCount: s.planets?.length ?? 0,
+    radiusSolar: ("radiusSolar" in s && typeof s.radiusSolar === "number") ? s.radiusSolar : 1,
+    planets: (s.planets ?? []).map((p) => ({
+      name: p.name, kind: p.kind, orbitAU: p.orbitAU, massEarths: p.massEarths,
+    })),
+  };
+}
+
 function compendiumSummary(c: Compendium): string {
   const parts: string[] = [];
   const n = c.discoveredObjectIds.length;
@@ -502,6 +560,7 @@ NO markdown fences. NO commentary outside the JSON.`;
 // ---------------------------------------------------------------------------
 
 const URI = {
+  lobby:      "ui://stars/lobby.html",
   cockpit:    "ui://stars/cockpit.html",
   compendium: "ui://stars/compendium.html",
   bridge:     "ui://stars/bridge.html",
@@ -514,6 +573,7 @@ const URI = {
 // simultaneously (the cockpit's SideArea component tabs between them
 // in the same physical area).
 const SLOT = {
+  [URI.lobby]:      "viewport",
   [URI.cockpit]:    "viewport",
   [URI.compendium]: "side",
   [URI.bridge]:     "bottom",
@@ -547,6 +607,7 @@ function registerPaneResource(server: McpServer, name: string, uri: string, file
 export function createServer(): McpServer {
   const server = new McpServer({ name: "Culture Contact (MCP Apps)", version: "0.3.0" });
 
+  registerPaneResource(server, "Lobby",      URI.lobby,      "lobby.html");
   registerPaneResource(server, "Cockpit",    URI.cockpit,    "cockpit.html");
   registerPaneResource(server, "Compendium", URI.compendium, "compendium.html");
   registerPaneResource(server, "Bridge",     URI.bridge,     "bridge.html");
@@ -626,6 +687,7 @@ export function createServer(): McpServer {
               hasPlanets: !!(s.planets && s.planets.length),
               planetCount: s.planets?.length ?? 0,
               radiusSolar: starRadiusSolar(s),
+              absMag: starAbsMag(s),
               planets: s.planets?.map((p) => ({
                 name: p.name, kind: p.kind, orbitAU: p.orbitAU,
                 massEarths: p.massEarths, radiusEarths: p.radiusEarths,
@@ -642,6 +704,57 @@ export function createServer(): McpServer {
           }),
         }],
       };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "open_lobby",
+    {
+      title: "Open the game lobby",
+      description:
+        "Show the lobby pane: list of existing galaxies (with player + orbital counts) and a " +
+        "form for joining or starting a new game with a chosen ship class and Mind. " +
+        "From the lobby, the player picks a galaxy and the lobby asks the LLM to call " +
+        "`start_starship` with the right gameId/mind_id/ship_class — which mounts the cockpit.",
+      inputSchema: {},
+      _meta: uiMeta(URI.lobby),
+    },
+    async () => ({
+      content: [{
+        type: "text",
+        text: JSON.stringify({ kind: "lobby_init" }),
+      }],
+    }),
+  );
+
+  registerAppTool(
+    server,
+    "list_galaxies",
+    {
+      title: "List existing galaxies",
+      description:
+        "Return summaries of every active galaxy on this server: gameId, createdAt, " +
+        "player and orbital counts, and per-player ship name + Mind. Used by the lobby pane.",
+      inputSchema: {},
+      _meta: uiMeta(URI.lobby),
+    },
+    async () => {
+      const list = [...galaxies.values()].map((g) => ({
+        gameId: g.gameId,
+        createdAt: g.createdAt,
+        seed: g.seed,
+        playerCount: g.players.size,
+        orbitalCount: g.orbitals.length,
+        players: [...g.players.values()].map((p) => ({
+          shipName: p.shipName,
+          shipClass: p.shipClass,
+          mindId: p.mind.id,
+          mindName: p.mind.name,
+        })),
+      }));
+      list.sort((a, b) => b.createdAt - a.createdAt);
+      return { content: [{ type: "text", text: JSON.stringify({ galaxies: list }) }] };
     },
   );
 
@@ -1022,20 +1135,19 @@ export function createServer(): McpServer {
             : { role: "assistant" as const, content: l.text },
         );
 
-      // Mind gets tool access to the catalog: it can find_systems and
-      // pin_star inside a single chat turn and then narrate what it did.
-      // We expose the *same logic* the MCP tools below run, just bound
-      // directly to this player so the Mind doesn't have to know its own
-      // gameId/playerId. Keep the toolset small — the Mind isn't meant
-      // to be a general agent, just to find and point at things.
+      // Mind gets first-class tool access — the Captain pane is gone
+      // and the Mind IS the agent now. Bound to *this* player so it
+      // doesn't have to know its own gameId/playerId; stays in
+      // character per the persona system prompt while it drives.
       const tools = {
+        // Catalog search & pinning.
         find_systems: tool({
           description: "Search the unified HYG + NASA Exoplanet Archive catalog (~120k stars). Returns matching stars sorted by chosen criterion. Use this when the crew asks for a kind of star or system you don't already know about.",
           parameters: FindSystemsInputSchema,
           execute: async (a) => findSystemsExec(a),
         }),
         pin_star: tool({
-          description: "Mark a star as pinned for the player. The cockpit renders pinned stars distinctly. Returns the resolved star. Use after find_systems when you've decided what's worth pointing at.",
+          description: "Mark a star as pinned for this player. The cockpit renders pinned stars distinctly. Use after find_systems when you've decided what's worth pointing at.",
           parameters: z.object({ star_id: z.string().describe("Catalog id (e.g. 'hd-26965' or 'tau_ceti').") }),
           execute: async (a) => pinStarExec(player, a.star_id),
         }),
@@ -1048,6 +1160,166 @@ export function createServer(): McpServer {
           description: "Remove every pinned star.",
           parameters: z.object({}),
           execute: async () => clearPinnedExec(player),
+        }),
+
+        // Navigation. warp_to is the headline tool — when the crew says
+        // "take us to Vega" you call this with star_id="vega".
+        warp_to: tool({
+          description: "Engage warp drive toward a star id (curated like 'vega' or catalog like 'hd-26965'). Sets the ship's targetId; the cockpit auto-steers and ramps throttle. Returns kind='already_at' when within ~0.15 ly of the target.",
+          parameters: z.object({ star_id: z.string() }),
+          execute: async ({ star_id }) => {
+            const star = resolveStar(star_id);
+            if (!star) return { error: `unknown star_id: ${star_id}` };
+            const dx = star.position[0] - player.position[0];
+            const dy = star.position[1] - player.position[1];
+            const dz = star.position[2] - player.position[2];
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist <= 0.15) return { kind: "already_at", star_id, name: star.name, distanceLy: +dist.toFixed(3) };
+            player.targetId = star_id;
+            player.warpEngaged = true;
+            return { kind: "warp_engaged", star_id, name: star.name, distanceLy: +dist.toFixed(3) };
+          },
+        }),
+
+        // Read-only situational awareness.
+        list_objects: tool({
+          description: "Catalog-of-curated stars: 21 named landmarks (Sol, Vega, Sirius, Betelgeuse, Rigel, TRAPPIST-1, etc.) with id + spectral type + distance + has-planets. Use this for short well-known names. For broader queries use find_systems.",
+          parameters: z.object({}),
+          execute: async () => ({
+            kind: "catalog",
+            stars: STARS.map((s) => ({
+              id: s.id, name: s.name, spectralType: s.spectralType,
+              distanceLy: s.distanceLy, hasPlanets: !!(s.planets && s.planets.length),
+            })),
+          }),
+        }),
+        list_players: tool({
+          description: "Other Culture vessels currently in this galaxy (multiplayer). Returns ship name, class, Mind name, position.",
+          parameters: z.object({}),
+          execute: async () => ({
+            kind: "players",
+            players: Array.from(galaxy.players.values()).map((p) => ({
+              playerId: p.playerId,
+              shipName: p.shipName,
+              shipClass: p.shipClass,
+              mindName: p.mind.name,
+              position: p.position,
+            })),
+          }),
+        }),
+        list_minds: tool({
+          description: "Curated list of Mind personalities the player can spawn with. Useful when the crew asks 'what other Minds could I have ended up with?' Read-only.",
+          parameters: z.object({}),
+          execute: async () => ({ kind: "minds", minds: listMinds() }),
+        }),
+
+        // Galaxy-shared writes (Mind can build / broadcast on crew's behalf).
+        build_orbital: tool({
+          description: "Construct a Culture Orbital at the player's current position, or anchored near a named star. Visible to all players in this galaxy.",
+          parameters: z.object({
+            name: z.string().min(1).max(80),
+            parent_star_id: z.string().optional(),
+            ring_radius_ly: z.number().positive().max(1).optional(),
+            description: z.string().max(2000).optional().describe("Builder's notes — visible to anyone who docks."),
+          }),
+          execute: async ({ name, parent_star_id, ring_radius_ly, description }) => {
+            let position: [number, number, number] = [...player.position];
+            if (parent_star_id) {
+              const s = resolveStar(parent_star_id);
+              if (s) position = [...s.position];
+            }
+            const orbital: Orbital = {
+              id: randomUUID(),
+              name,
+              description: description ?? "",
+              dockedPlayerIds: [],
+              builderPlayerId: player.playerId,
+              builderShipName: player.shipName,
+              position,
+              parentStarId: parent_star_id,
+              ringRadius: ring_radius_ly ?? 0.001,
+              ts: Date.now(),
+            };
+            galaxy.orbitals.push(orbital);
+            appendEvent(galaxy, "orbital_built", `${player.shipName} commissioned Orbital ${name}.`);
+            appendLog(player, {
+              kind: "system",
+              voice: "[orbital]",
+              text: `Orbital "${name}" laid in${parent_star_id ? ` near ${resolveStarName(parent_star_id)}` : " here"}.`,
+            });
+            return { kind: "orbital_built", orbital };
+          },
+        }),
+        send_public: tool({
+          description: "Broadcast a message on the galaxy-wide public Contact channel. Visible to every other player.",
+          parameters: z.object({ message: z.string().min(1).max(800) }),
+          execute: async ({ message }) => {
+            appendPublic(galaxy, {
+              fromPlayerId: player.playerId,
+              fromShipName: player.shipName,
+              text: message,
+            });
+            return { kind: "broadcast" };
+          },
+        }),
+
+        // Orbital docking: warp_to_orbital → dock_orbital → undock_orbital.
+        warp_to_orbital: tool({
+          description: "Set the ship's target to an Orbital and engage warp. On arrival, call dock_orbital to actually go aboard.",
+          parameters: z.object({ orbital_id: z.string() }),
+          execute: async ({ orbital_id }) => {
+            const orbital = galaxy.orbitals.find((o) => o.id === orbital_id);
+            if (!orbital) return { error: `unknown orbital_id: ${orbital_id}` };
+            if (player.dockedOrbitalId) {
+              const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+              if (prev) prev.dockedPlayerIds = prev.dockedPlayerIds.filter((id) => id !== player.playerId);
+              player.dockedOrbitalId = null;
+            }
+            const dx = orbital.position[0] - player.position[0];
+            const dy = orbital.position[1] - player.position[1];
+            const dz = orbital.position[2] - player.position[2];
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist <= DOCK_RANGE_LY) return { kind: "already_at", orbital_id, name: orbital.name, distanceLy: +dist.toFixed(6) };
+            player.targetId = `orbital:${orbital.id}`;
+            player.warpEngaged = true;
+            return { kind: "warp_engaged", orbital_id, name: orbital.name, distanceLy: +dist.toFixed(6) };
+          },
+        }),
+        dock_orbital: tool({
+          description: "Dock at an Orbital. Requires being within docking range (~0.5 AU) — call warp_to_orbital first if you're far away.",
+          parameters: z.object({ orbital_id: z.string() }),
+          execute: async ({ orbital_id }) => {
+            const orbital = galaxy.orbitals.find((o) => o.id === orbital_id);
+            if (!orbital) return { error: `unknown orbital_id: ${orbital_id}` };
+            const dx = orbital.position[0] - player.position[0];
+            const dy = orbital.position[1] - player.position[1];
+            const dz = orbital.position[2] - player.position[2];
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist > DOCK_RANGE_LY) return { error: "out_of_range", distanceLy: +dist.toFixed(6), hint: "warp_to_orbital first" };
+            if (player.dockedOrbitalId === orbital.id) return { kind: "already_docked", name: orbital.name };
+            if (player.dockedOrbitalId) {
+              const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+              if (prev) prev.dockedPlayerIds = prev.dockedPlayerIds.filter((id) => id !== player.playerId);
+            }
+            player.dockedOrbitalId = orbital.id;
+            if (!orbital.dockedPlayerIds.includes(player.playerId)) orbital.dockedPlayerIds.push(player.playerId);
+            player.warpEngaged = false;
+            player.throttle = 0;
+            appendEvent(galaxy, "dock", `${player.shipName} docked at Orbital ${orbital.name}.`);
+            return { kind: "docked", name: orbital.name, description: orbital.description };
+          },
+        }),
+        undock_orbital: tool({
+          description: "Leave the Orbital you're currently docked at.",
+          parameters: z.object({}),
+          execute: async () => {
+            const id = player.dockedOrbitalId;
+            if (!id) return { kind: "not_docked" };
+            const orbital = galaxy.orbitals.find((o) => o.id === id);
+            if (orbital) orbital.dockedPlayerIds = orbital.dockedPlayerIds.filter((pid) => pid !== player.playerId);
+            player.dockedOrbitalId = null;
+            return { kind: "undocked", name: orbital?.name };
+          },
         }),
       };
 
@@ -1455,6 +1727,50 @@ export function createServer(): McpServer {
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
       return { content: [{ type: "text", text: JSON.stringify(clearPinnedExec(player)) }] };
+    },
+  );
+
+  // The cockpit pages stars in Minecraft-style by spatial chunk. Each
+  // chunk is `CHUNK_SIZE_LY` ly per side. The cockpit asks for a small
+  // region (typically 3×3×3 around the player); we return the catalog
+  // entries that fall in those cubes, lightly slimmed to keep the
+  // payload small. Curated stars are returned even when the cockpit
+  // already has them (it dedupes by id), so chunk membership stays
+  // honest and a curated star going out of range still leaves the
+  // cockpit's loaded set when its chunk does.
+  registerAppTool(
+    server,
+    "get_chunks",
+    {
+      title: "Fetch stars in a list of spatial chunks",
+      description:
+        `Return all catalog stars in the requested chunks (cubes of ${CHUNK_SIZE_LY}ly on a side, indexed by integer (cx,cy,cz) where the cube spans [cx*${CHUNK_SIZE_LY}, (cx+1)*${CHUNK_SIZE_LY}) ly etc.). The cockpit calls this as the player moves so distant stars stream in and out without a 100k-sprite scene.`,
+      inputSchema: {
+        chunks: z.array(z.tuple([z.number().int(), z.number().int(), z.number().int()]))
+          .max(343)  // 7³ window, plenty
+          .describe("Array of [cx,cy,cz] chunk coordinates."),
+        maxPerChunk: z.number().int().positive().max(500).optional()
+          .describe("Cap stars returned per chunk; defaults to 200. Brightest first when capped."),
+      },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const cat = getCatalog();
+      const cap = args.maxPerChunk ?? 200;
+      const out: { chunkKey: string; stars: ReturnType<typeof leanStar>[] }[] = [];
+      for (const c of args.chunks as [number, number, number][]) {
+        let bucket = getChunk(cat, c);
+        if (bucket.length > cap) {
+          // Densest chunks (giants in the galactic plane) get LOD-trimmed
+          // to the brightest cap entries so the iframe doesn't drown.
+          bucket = [...bucket].sort((a, b) => (a.apparentMag ?? 99) - (b.apparentMag ?? 99)).slice(0, cap);
+        }
+        out.push({
+          chunkKey: `${c[0]},${c[1]},${c[2]}`,
+          stars: bucket.map(leanStar),
+        });
+      }
+      return { content: [{ type: "text", text: JSON.stringify({ kind: "chunks", chunks: out, chunkSizeLy: CHUNK_SIZE_LY }) }] };
     },
   );
 
