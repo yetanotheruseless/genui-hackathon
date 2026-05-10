@@ -27,7 +27,7 @@ import {
   RESOURCE_MIME_TYPE,
 } from "@modelcontextprotocol/ext-apps/server";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { generateText } from "ai";
+import { generateText, tool } from "ai";
 import fs, { appendFile, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -38,20 +38,81 @@ const DEBUG_LOG_PATH = process.env.DEBUG_LOG_PATH ?? "/tmp/cockpit-debug.log";
 // Truncate at startup so each subprocess (each new chat session) starts fresh.
 void writeFile(DEBUG_LOG_PATH, `--- session start ${new Date().toISOString()} pid=${process.pid} ---\n`).catch(() => {});
 
-import { STARS, STAR_INDEX, spectralBucket, starRadiusSolar, type Planet, type Star } from "./astrodata.js";
+import { STARS, STAR_INDEX, spectralBucket, starRadiusSolar, type Planet, type PlanetKind, type SpectralClass, type Star } from "./astrodata.js";
 import {
   MINDS,
   SHIP_CLASS_INFO,
   listMinds,
+  mindCatalogToolsBlock,
   mindContextBlock,
   mindSystemPrompt,
   pickMind,
   type MindPersona,
   type ShipClass,
 } from "./culture.js";
+import {
+  findSystems,
+  loadFullCatalog,
+  type CatalogStar,
+  type FullCatalog,
+} from "./catalog.js";
 import { generateTyped, getModel, getModelName, getProvider, hasCredentials } from "./llm.js";
 
 const DIST_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist");
+const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "data");
+
+// ---------------------------------------------------------------------------
+// Full HYG + Exoplanet catalog (~120k stars, ~6k planets). Loaded once at
+// startup. Lazily — wrapped in a getter so a missing data/ dir doesn't
+// crash the whole server during early dev. If it's missing, find_systems
+// throws a clear "fetch the catalog first" error and the rest of the
+// server still works against the curated 21.
+// ---------------------------------------------------------------------------
+
+let _catalog: FullCatalog | null = null;
+let _catalogError: Error | null = null;
+function getCatalog(): FullCatalog {
+  if (_catalog) return _catalog;
+  if (_catalogError) throw _catalogError;
+  try {
+    _catalog = loadFullCatalog(DATA_DIR, STARS);
+    return _catalog;
+  } catch (e) {
+    _catalogError = e instanceof Error ? e : new Error(String(e));
+    throw _catalogError;
+  }
+}
+// Eager-load at module init so startup time accounts for it. Failures
+// are remembered and surfaced when find_systems is actually called.
+try { getCatalog(); } catch (e) {
+  console.warn("[catalog] not loaded at startup:", (e as Error).message,
+    "— run scripts/fetch-hyg.ts and scripts/fetch-exoplanets.ts");
+}
+
+/** Resolve a star id from either the curated 21 or the full catalog. */
+function resolveStar(id: string): Star | CatalogStar | null {
+  if (STAR_INDEX[id]) return STAR_INDEX[id];
+  if (_catalog) {
+    const c = _catalog.byId.get(id);
+    if (c) return c;
+  }
+  return null;
+}
+
+/** Returns name (best-effort) for a star id. */
+function resolveStarName(id: string): string {
+  return resolveStar(id)?.name ?? id;
+}
+
+/** Short summary like "3 planets: 2× terrestrial, 1× gas_giant" or "" if none. */
+function planetSummaryFor(s: Star | CatalogStar | null): string {
+  if (!s || !s.planets || s.planets.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const p of s.planets) counts.set(p.kind, (counts.get(p.kind) ?? 0) + 1);
+  const parts: string[] = [];
+  for (const [k, v] of counts) parts.push(`${v}× ${k.replace("_", " ")}`);
+  return `${s.planets.length} planet${s.planets.length === 1 ? "" : "s"}: ${parts.join(", ")}`;
+}
 
 // ---------------------------------------------------------------------------
 // State — split into shared Galaxy and per-player Player.
@@ -84,6 +145,11 @@ type Player = {
   warpEngaged: boolean;
   log: LogLine[];           // private bridge log: narrations + chat
   compendium: Compendium;
+  /** Star ids the Mind (or captain agent) has pinned for this player.
+   *  Cockpit renders these distinctly; they survive across reloads as
+   *  long as the player record itself does (i.e. tab refresh keeps them,
+   *  reaper sweep clears them). Order = oldest first. */
+  pinnedStarIds: string[];
 };
 
 type Orbital = {
@@ -186,14 +252,17 @@ function newPlayer(_seed: number, shipClass: ShipClass, mind: MindPersona, reque
       discoveredObjectIds: [],
       discoveredObjectNames: [],
     },
+    pinnedStarIds: [],
   };
 }
 
-function recordDiscovery(player: Player, star: Star) {
+function recordDiscovery(player: Player, star: Star | CatalogStar) {
   if (player.compendium.discoveredObjectIds.includes(star.id)) return;
   player.compendium.discoveredObjectIds.push(star.id);
   player.compendium.discoveredObjectNames.push(star.name);
-  const bucket = spectralBucket(star);
+  // spectralBucket only inspects spectralClass/lumClass — both Star and
+  // CatalogStar carry those, so the cast is safe.
+  const bucket = spectralBucket(star as Star);
   player.compendium.spectralCounts[bucket] = (player.compendium.spectralCounts[bucket] || 0) + 1;
   for (const p of star.planets || []) {
     player.compendium.planetCounts[p.kind] = (player.compendium.planetCounts[p.kind] || 0) + 1;
@@ -215,6 +284,35 @@ function appendEvent(galaxy: Galaxy, kind: string, text: string) {
   if (galaxy.events.length > 80) galaxy.events.shift();
 }
 
+/** Resolve a player's pinnedStarIds into compact records the iframes /
+ *  Mind can read directly. Skips ids that no longer resolve. */
+function pinnedStarsView(player: Player) {
+  const out: {
+    id: string;
+    name: string;
+    spectralType: string;
+    distanceLy?: number;
+    position: [number, number, number];
+    planetCount: number;
+    planetSummary?: string;
+  }[] = [];
+  for (const id of player.pinnedStarIds) {
+    const s = resolveStar(id);
+    if (!s) continue;
+    const d = "distanceLy" in s ? s.distanceLy : undefined;
+    out.push({
+      id: id,
+      name: s.name,
+      spectralType: s.spectralType,
+      distanceLy: d ?? undefined,
+      position: s.position,
+      planetCount: s.planets?.length ?? 0,
+      planetSummary: planetSummaryFor(s) || undefined,
+    });
+  }
+  return out;
+}
+
 function nearbyPlayers(galaxy: Galaxy, self: Player, radiusLy: number = 30) {
   const result: { shipName: string; mindName: string; position: [number, number, number]; distance: number }[] = [];
   for (const p of galaxy.players.values()) {
@@ -229,6 +327,102 @@ function nearbyPlayers(galaxy: Galaxy, self: Player, radiusLy: number = 30) {
     }
   }
   return result.sort((a, b) => a.distance - b.distance);
+}
+
+// ---------------------------------------------------------------------------
+// Catalog-tool primitives. Defined once and re-used by both the bound-
+// tool path inside talk_to_mind and the standalone MCP tool registrations
+// below. Same logic, two callsites.
+// ---------------------------------------------------------------------------
+
+const PLANET_KINDS: PlanetKind[] = [
+  "terrestrial", "super_earth", "neptune_like", "ice_giant",
+  "gas_giant", "hot_jupiter", "super_jupiter",
+];
+const SPECTRAL_CLASSES: SpectralClass[] = ["O", "B", "A", "F", "G", "K", "M", "L", "T", "WD", "NS"];
+
+/**
+ * Some providers (looking at you, Anthropic) occasionally serialize a
+ * single-value enum as the JSON of a one-element array: `"[\"foo\"]"`.
+ * Coerce: if input looks like that, unwrap to the inner string.
+ */
+function coerceEnum<T extends [string, ...string[]]>(values: T) {
+  return z.preprocess((v) => {
+    if (typeof v !== "string") return v;
+    if (v.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed) && parsed.length === 1 && typeof parsed[0] === "string") return parsed[0];
+      } catch { /* leave as-is, validation will fail informatively */ }
+    }
+    return v;
+  }, z.enum(values));
+}
+
+const FindSystemsInputSchema = z.object({
+  hasPlanetKinds: z.array(z.enum(PLANET_KINDS as [PlanetKind, ...PlanetKind[]])).optional()
+    .describe("If set, only return stars hosting at least one planet of EVERY listed kind."),
+  spectralClasses: z.array(z.enum(SPECTRAL_CLASSES as [SpectralClass, ...SpectralClass[]])).optional()
+    .describe("Restrict to these spectral classes (e.g. ['G','K'] for sun-like)."),
+  excludeIds: z.array(z.string()).optional().describe("Drop these ids from the result (e.g. ['sol'])."),
+  nearPosition: z.tuple([z.number(), z.number(), z.number()]).optional()
+    .describe("ly position to measure 'nearby' from. Defaults to Sol."),
+  maxDistanceLy: z.number().positive().optional(),
+  sort: coerceEnum(["distance_to_origin", "distance_to_position", "luminosity"]).optional(),
+  requirePlanets: z.boolean().optional().describe("If true (or hasPlanetKinds is set), only stars with at least one known planet."),
+  limit: z.number().int().positive().max(200).optional(),
+});
+type FindSystemsInput = z.infer<typeof FindSystemsInputSchema>;
+
+function findSystemsExec(args: FindSystemsInput) {
+  const cat = getCatalog();
+  const results = findSystems(cat, {
+    hasPlanetKinds: args.hasPlanetKinds,
+    spectralClasses: args.spectralClasses,
+    excludeIds: args.excludeIds,
+    nearPosition: args.nearPosition,
+    maxDistanceLy: args.maxDistanceLy,
+    sort: args.sort as "distance_to_origin" | "distance_to_position" | "luminosity" | undefined,
+    requirePlanets: args.requirePlanets,
+    limit: args.limit ?? 10,
+  });
+  return { kind: "find_systems_result", count: results.length, results };
+}
+
+function pinStarExec(player: Player, starId: string) {
+  // Resolve via curated OR catalog so the Mind can pin Banks-named stars
+  // ("vega") just as easily as raw HYG ids.
+  const star = resolveStar(starId);
+  if (!star) return { error: `unknown star_id: ${starId}` };
+  if (!player.pinnedStarIds.includes(starId)) {
+    player.pinnedStarIds.push(starId);
+    appendLog(player, {
+      kind: "system",
+      voice: "[pin]",
+      text: `📍 ${star.name} pinned (${star.spectralType}${star.planets?.length ? `, ${star.planets.length} planets` : ""}).`,
+    });
+  }
+  return {
+    kind: "pinned",
+    star_id: starId,
+    name: star.name,
+    spectralType: star.spectralType,
+    position: star.position,
+    distanceLy: star.distanceLy ?? null,
+    planetCount: star.planets?.length ?? 0,
+  };
+}
+
+function unpinStarExec(player: Player, starId: string) {
+  const before = player.pinnedStarIds.length;
+  player.pinnedStarIds = player.pinnedStarIds.filter((id) => id !== starId);
+  return { kind: "unpinned", star_id: starId, removed: before !== player.pinnedStarIds.length };
+}
+
+function clearPinnedExec(player: Player) {
+  const n = player.pinnedStarIds.length;
+  player.pinnedStarIds = [];
+  return { kind: "cleared", removed: n };
 }
 
 function compendiumSummary(c: Compendium): string {
@@ -347,6 +541,8 @@ export function createServer(): McpServer {
       let reattached = false;
       if (existing) {
         existing.lastSeenAt = Date.now();
+        // Defensive backfill for fields added since this player was spawned.
+        if (!Array.isArray(existing.pinnedStarIds)) existing.pinnedStarIds = [];
         player = existing;
         mind = existing.mind;
         shipClass = existing.shipClass;
@@ -508,6 +704,7 @@ export function createServer(): McpServer {
             mind: { id: player.mind.id, name: player.mind.name },
             log: player.log,
             compendium: player.compendium,
+            pinnedStars: pinnedStarsView(player),
             // shared:
             galaxy: {
               gameId: galaxy.gameId,
@@ -541,7 +738,7 @@ export function createServer(): McpServer {
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
       const player = getPlayer(galaxy, args.playerId);
-      const star = STAR_INDEX[args.objectId];
+      const star = resolveStar(args.objectId);
       if (!star) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `unknown objectId: ${args.objectId}` }) }] };
       }
@@ -615,7 +812,7 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
-      const star = STAR_INDEX[args.objectId];
+      const star = resolveStar(args.objectId);
       if (!star) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `unknown objectId: ${args.objectId}` }) }] };
       }
@@ -670,10 +867,10 @@ export function createServer(): McpServer {
         shipClass: player.shipClass,
         position: player.position,
         throttle: player.throttle,
-        targetName: player.targetId ? STAR_INDEX[player.targetId]?.name : undefined,
-        hoveredName: player.hoveredId ? STAR_INDEX[player.hoveredId]?.name : undefined,
+        targetName: player.targetId ? resolveStarName(player.targetId) : undefined,
+        hoveredName: player.hoveredId ? resolveStarName(player.hoveredId) : undefined,
         recentObservations: player.compendium.discoveredObjectIds.slice(-5).map((id) => ({
-          name: STAR_INDEX[id]?.name ?? id,
+          name: resolveStarName(id),
         })),
         compendiumSummary: compendiumSummary(player.compendium),
         nearbyPlayers: nearbyPlayers(galaxy, player).map((p) => ({
@@ -681,8 +878,12 @@ export function createServer(): McpServer {
         })),
         orbitals: galaxy.orbitals.map((o) => ({
           name: o.name,
-          near: o.parentStarId ? STAR_INDEX[o.parentStarId]?.name : undefined,
+          near: o.parentStarId ? resolveStarName(o.parentStarId) : undefined,
           builderShip: o.builderShipName,
+        })),
+        pinnedStars: pinnedStarsView(player).map((s) => ({
+          id: s.id, name: s.name, spectralType: s.spectralType,
+          distanceLy: s.distanceLy, planetSummary: s.planetSummary,
         })),
       });
 
@@ -695,16 +896,47 @@ export function createServer(): McpServer {
             : { role: "assistant" as const, content: l.text },
         );
 
+      // Mind gets tool access to the catalog: it can find_systems and
+      // pin_star inside a single chat turn and then narrate what it did.
+      // We expose the *same logic* the MCP tools below run, just bound
+      // directly to this player so the Mind doesn't have to know its own
+      // gameId/playerId. Keep the toolset small — the Mind isn't meant
+      // to be a general agent, just to find and point at things.
+      const tools = {
+        find_systems: tool({
+          description: "Search the unified HYG + NASA Exoplanet Archive catalog (~120k stars). Returns matching stars sorted by chosen criterion. Use this when the crew asks for a kind of star or system you don't already know about.",
+          parameters: FindSystemsInputSchema,
+          execute: async (a) => findSystemsExec(a),
+        }),
+        pin_star: tool({
+          description: "Mark a star as pinned for the player. The cockpit renders pinned stars distinctly. Returns the resolved star. Use after find_systems when you've decided what's worth pointing at.",
+          parameters: z.object({ star_id: z.string().describe("Catalog id (e.g. 'hd-26965' or 'tau_ceti').") }),
+          execute: async (a) => pinStarExec(player, a.star_id),
+        }),
+        unpin_star: tool({
+          description: "Remove a previously pinned star.",
+          parameters: z.object({ star_id: z.string() }),
+          execute: async (a) => unpinStarExec(player, a.star_id),
+        }),
+        clear_pinned: tool({
+          description: "Remove every pinned star.",
+          parameters: z.object({}),
+          execute: async () => clearPinnedExec(player),
+        }),
+      };
+
       // Fail-fast: no try/catch, no fallback. If the provider call errors,
       // the MCP framework surfaces it as isError:true and the bridge pane
       // displays a "Mind link failed" banner. That's the signal to fix.
       const result = await generateText({
         model: getModel(),
-        system: `${mindSystemPrompt(player.mind)}\n\nLIVE SHIP CONTEXT:\n${ctx}`,
+        system: `${mindSystemPrompt(player.mind)}\n${mindCatalogToolsBlock()}\n\nLIVE SHIP CONTEXT:\n${ctx}`,
         messages: history.length ? history : [{ role: "user", content: args.message }],
+        tools,
+        maxSteps: 5,
         maxRetries: 1,
       });
-      const reply = result.text.trim();
+      const reply = (result.text || "").trim();
 
       appendLog(player, { kind: "mind_chat", voice: player.mind.name, text: reply });
       return { content: [{ type: "text", text: JSON.stringify({ kind: "reply", text: reply }) }] };
@@ -850,6 +1082,71 @@ export function createServer(): McpServer {
     async () => ({
       content: [{ type: "text", text: JSON.stringify({ kind: "minds", minds: listMinds() }) }],
     }),
+  );
+
+  // --- CATALOG (HYG + NASA Exoplanet Archive) -------------------------
+  // The Mind reaches these via tool-calls inside talk_to_mind; the
+  // captain agent reaches them as standalone MCP tools. Both routes
+  // funnel into the same exec helpers above.
+
+  registerAppTool(
+    server,
+    "find_systems",
+    {
+      title: "Search the full star + exoplanet catalog",
+      description:
+        "Query the unified HYG + NASA Exoplanet Archive catalog (~120k stars, ~6.3k known planets). Filter by planet kinds, spectral class, distance, etc. Returns up to `limit` results sorted by the chosen criterion.",
+      inputSchema: FindSystemsInputSchema.shape,
+      _meta: uiMeta(URI.bridge),
+    },
+    async (args) => ({
+      content: [{ type: "text", text: JSON.stringify(findSystemsExec(args as FindSystemsInput)) }],
+    }),
+  );
+
+  registerAppTool(
+    server,
+    "pin_star",
+    {
+      title: "Pin a star to the player's cockpit",
+      description: "Add a star id to this player's pinnedStarIds[]. The cockpit renders pinned stars distinctly. Accepts curated ids ('tau_ceti') and catalog ids ('hd-26965').",
+      inputSchema: { gameId: z.string(), playerId: z.string(), star_id: z.string() },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const player = getPlayer(getGalaxy(args.gameId), args.playerId);
+      return { content: [{ type: "text", text: JSON.stringify(pinStarExec(player, args.star_id)) }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "unpin_star",
+    {
+      title: "Unpin a star",
+      description: "Remove a star from the player's pinnedStarIds[].",
+      inputSchema: { gameId: z.string(), playerId: z.string(), star_id: z.string() },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const player = getPlayer(getGalaxy(args.gameId), args.playerId);
+      return { content: [{ type: "text", text: JSON.stringify(unpinStarExec(player, args.star_id)) }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "clear_pinned",
+    {
+      title: "Clear all pinned stars",
+      description: "Empty this player's pinnedStarIds[].",
+      inputSchema: { gameId: z.string(), playerId: z.string() },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const player = getPlayer(getGalaxy(args.gameId), args.playerId);
+      return { content: [{ type: "text", text: JSON.stringify(clearPinnedExec(player)) }] };
+    },
   );
 
   // --- DEBUG -----------------------------------------------------------
