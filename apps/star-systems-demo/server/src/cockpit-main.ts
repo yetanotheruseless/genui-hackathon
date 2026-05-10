@@ -63,10 +63,16 @@ const PLANET_COLOR: Record<string, number> = {
 
 // In-system gameplay range. Within this distance of any star, the
 // cockpit auto-throttles to a sub-warp speed so you can actually see
-// the system instead of zooming through it. The closest star also gets
-// rendered as a real 3D sphere instead of a sprite.
+// the system instead of zooming through it. The systemLight, planet
+// visibility, and auto-observe trigger off this same threshold.
 const BRAKE_RANGE_AU = 100;
 const BRAKE_RANGE_LY = BRAKE_RANGE_AU * LY_PER_AU;
+// Wider band where the closest star is rendered as a real sphere
+// (closeStarMesh) with min-pixel clamp instead of the sprite. Closes
+// the visible gap between "tiny far sprite" and "in-system planets+
+// sphere" — the sphere shows as a small bright dot at this range and
+// grows smoothly with proximity.
+const CLOSE_MESH_RANGE_LY = 0.1;
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
 const overlay = document.getElementById("overlay") as HTMLDivElement;
@@ -185,8 +191,18 @@ const spikeLayer = new THREE.Group();
 scene.add(warpStars);
 scene.add(haloLayer);
 scene.add(spikeLayer);
-const orbitalGroup = new THREE.Group();
-scene.add(orbitalGroup);
+// Orbital LOD layers — distant icon (sprite) and closeup habitat (real
+// ring geometry). The icon's per-frame scale uses the same min-pixel
+// floor as stars so a distant orbital reads as a glowing ring even
+// from across the galaxy. The closeup geometry only swaps in within
+// ORBITAL_CLOSEUP_RANGE_LY of the camera; outside that range the
+// expensive geometry is hidden, the cheap sprite carries the look.
+const orbitalIconLayer = new THREE.Group();    // distant LOD: additive sprites
+const orbitalHabitatLayer = new THREE.Group(); // closeup LOD: real ring geometry
+scene.add(orbitalIconLayer);
+scene.add(orbitalHabitatLayer);
+const ORBITAL_CLOSEUP_RANGE_LY = BRAKE_RANGE_LY * 2;
+const ORBITAL_DOCK_RANGE_LY = 0.5 * LY_PER_AU;  // mirror of server DOCK_RANGE_LY
 const otherShipsGroup = new THREE.Group();
 scene.add(otherShipsGroup);
 
@@ -274,6 +290,39 @@ function makeSpikeTexture(size = 256): THREE.Texture {
   return tex;
 }
 const SPIKE_TEX = makeSpikeTexture(256);
+
+// Distant orbital icon — a thin glowing ring drawn into a square canvas.
+// Additive blending makes it read as a halo against black sky, identical
+// in spirit to the star halo but with an annular shape so the marker
+// reads "ring habitat" even at one-pixel-wide.
+function makeOrbitalIconTexture(size = 256): THREE.Texture {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d")!;
+  ctx.translate(size / 2, size / 2);
+  // Outer glow halo
+  const halo = ctx.createRadialGradient(0, 0, size * 0.18, 0, 0, size * 0.5);
+  halo.addColorStop(0, "rgba(255,255,255,0.25)");
+  halo.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = halo;
+  ctx.fillRect(-size / 2, -size / 2, size, size);
+  // Hollow ring
+  ctx.lineWidth = size * 0.04;
+  ctx.strokeStyle = "rgba(255,255,255,0.95)";
+  ctx.beginPath();
+  ctx.arc(0, 0, size * 0.36, 0, Math.PI * 2);
+  ctx.stroke();
+  // Inner soft glow on the ring
+  ctx.lineWidth = size * 0.10;
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.beginPath();
+  ctx.arc(0, 0, size * 0.36, 0, Math.PI * 2);
+  ctx.stroke();
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const ORBITAL_ICON_TEX = makeOrbitalIconTexture(256);
 
 // One planet mesh per known planet across the whole catalog. They're real
 // world-space spheres at fixed physical radius (PLANET_VISUAL_SCALE × real),
@@ -486,18 +535,122 @@ function normalizeAngle(a: number): number {
   return a;
 }
 
-function syncOrbitals(orbitals: any[]) {
-  // Cheap rebuild — orbitals don't churn fast.
-  orbitalGroup.clear();
+// Orbital state mirrored from the server. Two parallel groupings:
+//   - `orbitalLayers` is keyed by id and owns the THREE.Object3D handles
+//     so per-frame updates don't hash-walk the scene graph.
+//   - `currentOrbitals` is the flat array used by HUD / target lookup
+//     code, mirroring the get_state shape.
+type OrbitalLite = {
+  id: string;
+  name: string;
+  builderShipName: string;
+  position: [number, number, number];
+  ringRadius: number;
+  description?: string;
+  dockedPlayerIds?: string[];
+};
+type OrbitalLayers = {
+  icon: THREE.Sprite;          // distant LOD: additive ring sprite
+  habitat: THREE.Group;        // closeup LOD: outer ring + spinning inner strip
+  habitatInner: THREE.Mesh;    // the spinning emissive ring inside `habitat`
+  data: OrbitalLite;
+};
+const orbitalLayers = new Map<string, OrbitalLayers>();
+let currentOrbitals: OrbitalLite[] = [];
+
+// Reused geometry for the closeup habitat ring. ringRadius is normalized
+// to 1 here; the per-orbital scale on the Group sets the actual size in
+// light-years from orbital.ringRadius.
+const ORBITAL_OUTER_GEOM = new THREE.TorusGeometry(1.0, 0.02, 8, 96);
+const ORBITAL_INNER_GEOM = new THREE.TorusGeometry(0.985, 0.012, 6, 96);
+
+function syncOrbitals(orbitals: OrbitalLite[]) {
+  currentOrbitals = orbitals;
+  // Diff: build/keep/remove. Orbitals are immutable once built (the only
+  // server-side mutation is dockedPlayerIds), so we just need to ensure
+  // every server-known id has a matching layer set.
+  const seen = new Set<string>();
   for (const o of orbitals) {
-    const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(Math.max(0.05, o.ringRadius * 100), 0.008, 4, 32),
-      new THREE.MeshBasicMaterial({ color: 0x9c6cff, transparent: true, opacity: 0.55, side: THREE.DoubleSide }),
-    );
-    ring.position.set(o.position[0], o.position[1], o.position[2]);
-    ring.rotation.x = Math.PI / 2.5;
-    orbitalGroup.add(ring);
+    seen.add(o.id);
+    let layers = orbitalLayers.get(o.id);
+    if (!layers) layers = createOrbitalLayers(o);
+    layers.data = o;
+    layers.icon.position.set(o.position[0], o.position[1], o.position[2]);
+    layers.habitat.position.set(o.position[0], o.position[1], o.position[2]);
   }
+  for (const [id, layers] of [...orbitalLayers]) {
+    if (seen.has(id)) continue;
+    orbitalIconLayer.remove(layers.icon);
+    orbitalHabitatLayer.remove(layers.habitat);
+    orbitalLayers.delete(id);
+  }
+}
+
+function createOrbitalLayers(o: OrbitalLite): OrbitalLayers {
+  // Distant icon — additive ring sprite tinted with a stable
+  // builder-derived hue so different orbitals are visually distinct
+  // without us needing per-orbital metadata.
+  const tint = orbitalTint(o);
+  const icon = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: ORBITAL_ICON_TEX,
+    color: tint,
+    sizeAttenuation: true,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    opacity: 0.9,
+  }));
+  icon.userData = { orbitalId: o.id };
+  orbitalIconLayer.add(icon);
+
+  // Closeup habitat — a Group so we can tilt the ring once and spin the
+  // inner strip independently per-frame. Outer torus is structural
+  // (white, low opacity); inner torus is emissive (tinted, additive)
+  // and rotates around the ring's axis to show the orbital is rotating.
+  const habitat = new THREE.Group();
+  habitat.userData = { orbitalId: o.id };
+  habitat.rotation.x = Math.PI / 2;        // ring lies in the XZ plane
+  habitat.visible = false;                  // hidden until close enough
+
+  const outer = new THREE.Mesh(
+    ORBITAL_OUTER_GEOM,
+    new THREE.MeshBasicMaterial({
+      color: 0xc6d6e8,
+      transparent: true,
+      opacity: 0.55,
+      side: THREE.DoubleSide,
+      fog: false,
+      depthWrite: false,
+    }),
+  );
+  habitat.add(outer);
+
+  const inner = new THREE.Mesh(
+    ORBITAL_INNER_GEOM,
+    new THREE.MeshBasicMaterial({
+      color: tint,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      fog: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  );
+  habitat.add(inner);
+
+  orbitalHabitatLayer.add(habitat);
+  return { icon, habitat, habitatInner: inner, data: o };
+}
+
+/** Stable hue in (180°..300°) keyed off the orbital id, so multiple
+ *  orbitals are visually distinguishable without per-orbital styling. */
+function orbitalTint(o: OrbitalLite): number {
+  let h = 0;
+  for (let i = 0; i < o.id.length; i++) h = ((h << 5) - h + o.id.charCodeAt(i)) | 0;
+  const hue = 180 + (Math.abs(h) % 120);    // teal → blue → violet range
+  const c = new THREE.Color().setHSL(hue / 360, 0.55, 0.7);
+  return c.getHex();
 }
 
 function syncOtherShips(others: any[]) {
@@ -708,6 +861,19 @@ function pickStarUnderClick(clientX: number, clientY: number) {
       bestId = (obj.userData?.star as StarLite | undefined)?.id ?? null;
     }
   }
+  // Orbital icons share the same pick test against the same angular
+  // tolerance — pick whichever sprite is closest to the cursor ray, with
+  // an `orbital:` prefix so engageWarp routes to warp_to_orbital.
+  for (const sprite of orbitalIconLayer.children) {
+    if (!(sprite instanceof THREE.Sprite)) continue;
+    const v = sprite.position.clone().sub(camera.position).normalize();
+    const angle = v.angleTo(raycaster.ray.direction);
+    if (angle < bestAngle) {
+      bestAngle = angle;
+      const oid = (sprite.userData as { orbitalId?: string } | undefined)?.orbitalId;
+      bestId = oid ? `orbital:${oid}` : null;
+    }
+  }
   if (bestId) engageWarp(bestId);
 }
 
@@ -716,7 +882,106 @@ async function engageWarp(objectId: string) {
   ship.targetId = objectId;
   ship.warpEngaged = true;
   lastSyncedTargetId = objectId;
-  await callTool(pane.app, "warp_to", { gameId, playerId, objectId });
+  if (objectId.startsWith("orbital:")) {
+    const orbitalId = objectId.slice("orbital:".length);
+    await callTool(pane.app, "warp_to_orbital", { gameId, playerId, orbitalId });
+  } else {
+    await callTool(pane.app, "warp_to", { gameId, playerId, objectId });
+  }
+}
+
+/** Resolve a target id to a world position. Handles both star ids and
+ *  the `orbital:<id>` namespace produced by warp_to_orbital. Returns
+ *  null when the target is unknown locally (e.g. orbital still hasn't
+ *  arrived in the get_state poll yet — callers should treat this as
+ *  "wait for next tick"). */
+function resolveTargetPosition(id: string | null): { pos: [number, number, number]; isOrbital: boolean; name: string } | null {
+  if (!id) return null;
+  if (id.startsWith("orbital:")) {
+    const oid = id.slice("orbital:".length);
+    const o = orbitalLayers.get(oid)?.data;
+    if (!o) return null;
+    return { pos: o.position, isOrbital: true, name: o.name };
+  }
+  const s = stars.find((s) => s.id === id);
+  return s ? { pos: s.position, isOrbital: false, name: s.name } : null;
+}
+
+// Bright catalog backdrop. The server sends a packed array of
+// [x, y, z, spectralClass, apparentMag] per star. We build ONE
+// THREE.Points cloud for ~17k bright stars — single draw call, all
+// per-frame work is on the GPU. The curated 21 stars (which get the
+// rich layered-sprite + halo + spike treatment) are filtered out
+// server-side so we don't double-render.
+type BrightTuple = [number, number, number, string, number];
+const brightStarsGroup = new THREE.Group();
+scene.add(brightStarsGroup);
+
+function buildBrightStars(bright: BrightTuple[]) {
+  // Tear down any previous cloud (e.g. on a re-init).
+  while (brightStarsGroup.children.length) {
+    const c = brightStarsGroup.children[0];
+    brightStarsGroup.remove(c);
+    if ((c as THREE.Points).geometry) (c as THREE.Points).geometry.dispose();
+  }
+  if (!bright.length) return;
+
+  const N = bright.length;
+  const positions = new Float32Array(N * 3);
+  const colors = new Float32Array(N * 3);
+  const sizes = new Float32Array(N);
+  const tmpColor = new THREE.Color();
+  for (let i = 0; i < N; i++) {
+    const t = bright[i];
+    positions[i * 3 + 0] = t[0];
+    positions[i * 3 + 1] = t[1];
+    positions[i * 3 + 2] = t[2];
+    tmpColor.setHex(spectralColor(t[3], "V"));
+    colors[i * 3 + 0] = tmpColor.r;
+    colors[i * 3 + 1] = tmpColor.g;
+    colors[i * 3 + 2] = tmpColor.b;
+    // Pixel size by magnitude. Brighter = bigger; clamp so the brightest
+    // landmarks (Sirius mag −1.5, Canopus −0.7) are still readable points
+    // and the dimmest brights (mag ≤ 2.5) don't disappear.
+    const mag = t[4];
+    sizes[i] = Math.max(1.5, Math.min(5.5, 4.0 - mag * 0.8));
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("color",    new THREE.BufferAttribute(colors,    3));
+  geometry.setAttribute("size",     new THREE.BufferAttribute(sizes,     1));
+
+  // Custom shader: per-vertex point size, circular alpha falloff so the
+  // GL_POINT square is invisible.
+  const material = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true,
+    vertexShader: `
+      attribute float size;
+      varying vec3 vColor;
+      void main() {
+        vColor = color;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = size;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        vec2 uv = gl_PointCoord - vec2(0.5);
+        float r = length(uv);
+        if (r > 0.5) discard;
+        float a = smoothstep(0.5, 0.0, r);
+        gl_FragColor = vec4(vColor, a);
+      }
+    `,
+  });
+  const points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;     // bounding sphere is meaningless across 1000s of ly
+  brightStarsGroup.add(points);
 }
 
 // --- init ---
@@ -725,6 +990,7 @@ pane.initial.then((init) => {
   playerId = init.playerId;
   stars = init.stars || [];
   buildStarMeshes();
+  if (init.bright && Array.isArray(init.bright)) buildBrightStars(init.bright as BrightTuple[]);
   if (init.llm) hudLlm.textContent = `${init.llm.online ? "" : "offline · "}${init.llm.provider}/${init.llm.model}`;
   if (init.ship && hudShip) hudShip.textContent = init.ship.name;
   if (init.ship && hudMind) hudMind.textContent = init.ship.class;
@@ -743,9 +1009,9 @@ function tick() {
   );
 
   if (ship.warpEngaged && ship.targetId) {
-    const target = stars.find((s) => s.id === ship.targetId);
+    const target = resolveTargetPosition(ship.targetId);
     if (target) {
-      const targetPos = new THREE.Vector3(...target.position);
+      const targetPos = new THREE.Vector3(...target.pos);
       const dir = targetPos.clone().sub(ship.position);
       const dist = dir.length();
       dir.normalize();
@@ -753,17 +1019,29 @@ function tick() {
       const newFwd = fwd.lerp(dir, blend).normalize();
       ship.yaw   = Math.atan2(newFwd.x, -newFwd.z);
       ship.pitch = Math.asin(Math.max(-1, Math.min(1, newFwd.y)));
-      const targetThrottle = dist > 1 ? 0.95 : Math.max(0.1, Math.min(0.4, dist * 0.8));
+      // Orbitals get a much tighter arrival distance than star systems —
+      // the dock_orbital tool requires being within ~0.5 AU, so we
+      // creep in for the last AU instead of sliding to a halt at 100 AU.
+      const arrivalRange = target.isOrbital ? ORBITAL_DOCK_RANGE_LY : OBSERVE_RANGE_LY;
+      const targetThrottle = dist > 1 ? 0.95 : Math.max(0.05, Math.min(0.4, dist * 0.8));
       ship.throttle = ship.throttle * 0.85 + targetThrottle * 0.15;
       throttleEl.value = ship.throttle.toString();
-      if (dist <= OBSERVE_RANGE_LY) {
+      if (dist <= arrivalRange) {
         ship.warpEngaged = false;
         ship.throttle = 0;
         throttleEl.value = "0";
-        if (!observed.has(target.id)) {
-          observed.add(target.id);
+        if (target.isOrbital) {
+          // Auto-dock on arrival. Server is the source of truth — it
+          // re-checks the range and sets player.dockedOrbitalId, which
+          // the bridge pane reads to render the description card.
+          if (gameId && playerId && ship.targetId) {
+            const oid = ship.targetId.slice("orbital:".length);
+            void callTool(pane.app, "dock_orbital", { gameId, playerId, orbitalId: oid });
+          }
+        } else if (!observed.has(ship.targetId)) {
+          observed.add(ship.targetId);
           if (gameId && playerId) {
-            void callTool(pane.app, "observe", { gameId, playerId, objectId: target.id });
+            void callTool(pane.app, "observe", { gameId, playerId, objectId: ship.targetId });
           }
         }
       }
@@ -820,15 +1098,17 @@ function tick() {
   const minRadiusForPx = (px: number, d: number) => (px * d * 0.7 * 2) / canvasH;
   const minVisibleRadiusAt = (d: number) => minRadiusForPx(0.3, d);
 
-  // Per-frame three-layer star scaling. Core gets the min-pixel floor;
-  // halo follows core in world units but is hard-capped to a screen
-  // fraction so it can never balloon to full-viewport when you're
-  // sub-AU from a star (which would otherwise read as a giant white
-  // texture-quad behind the close-star sphere). Spike is in pixel units
-  // and fades as the core blooms past a few pixels.
+  // Per-frame three-layer star scaling. Core gets the min-pixel floor
+  // for distant visibility AND a max-pixel cap so it can never grow
+  // larger than ~CORE_MAX_PX on screen — without that cap, a base 0.08 ly
+  // sprite at 0.01 ly distance is 8× the viewport and bloom turns the
+  // whole frame to flat white. Halo follows core in world units, also
+  // capped. Spike is in pixel units and fades as the core blooms past
+  // a few pixels.
   // LOD note: when the catalog grows past ~100 stars this loop is the
   // place to gate the halo + spike behind a visibility / distance test.
   const STAR_MIN_PX = 1.5;
+  const CORE_MAX_PX = 60;             // sprite core hard cap (lets closeStarMesh take over)
   const HALO_RATIO = 7.0;             // halo radius = HALO_RATIO × core radius
   const HALO_MAX_SCREEN_FRAC = 0.18;  // halo angular radius cap (NDC fraction)
   const SPIKE_BASE_PX = 28;           // pixel-size of spike for a G dwarf core
@@ -840,7 +1120,8 @@ function tick() {
     const sz = layers.core.position.z - ship.position.z;
     const d = Math.hypot(sx, sy, sz);
     const minR = minRadiusForPx(STAR_MIN_PX, d);
-    const coreR = Math.max(base, minR);
+    const maxR = minRadiusForPx(CORE_MAX_PX, d);
+    const coreR = Math.min(maxR, Math.max(base, minR));
     layers.core.scale.set(coreR, coreR, 1);
     // World radius that subtends HALO_MAX_SCREEN_FRAC of the viewport
     // height at this distance — the cap.
@@ -897,19 +1178,20 @@ function tick() {
   }
   currentPlanets = live;
 
-  if (closest && closest.dist < BRAKE_RANGE_LY) {
-    const distAu = closest.dist / LY_PER_AU;
+  // closeStarMesh activates whenever the closest star is within
+  // CLOSE_MESH_RANGE_LY (≈ 0.1 ly, much wider than BRAKE_RANGE_LY).
+  // The min-pixel clamp keeps it visible as a tiny bright dot from far
+  // and lets it grow smoothly as you approach — closes the visible gap
+  // between the sprite and the in-system view.
+  if (closest && closest.dist < CLOSE_MESH_RANGE_LY) {
     // Real radius for proper-scale rendering, BUT also clamp to a
     // minimum apparent size in pixels so M dwarfs / white dwarfs don't
     // become subpixel ghosts. Stellar/atlas apps do this to keep tiny
     // stars findable. Big stars (Betelgeuse) render at true scale
     // because true scale already exceeds the floor.
     const trueRadiusLy = (closest.star.radiusSolar ?? 1.0) * SOL_RADIUS_LY;
-    // Min radius = N pixels at this camera distance, given our FOV.
-    // tan(35°) ≈ 0.7, height in pixels from canvas; gives radius such
-    // that the sphere subtends MIN_PX pixels.
     const MIN_PX = 4;
-    const minRadiusLy = (MIN_PX * closest.dist * 1.4) / canvasH;
+    const minRadiusLy = minRadiusForPx(MIN_PX, closest.dist);
     const radiusLy = Math.max(trueRadiusLy, minRadiusLy);
     closeStarMesh.position.set(...closest.star.position);
     closeStarMesh.scale.setScalar(radiusLy);
@@ -917,7 +1199,15 @@ function tick() {
       spectralColor(closest.star.spectralClass, closest.star.lumClass),
     );
     closeStarMesh.visible = closest.dist > trueRadiusLy;  // hide if camera is inside the star's actual photosphere
+  } else {
+    closeStarMesh.visible = false;
+  }
 
+  // Autobrake / observe-on-entry / planet visibility / systemLight stay
+  // gated on the tighter BRAKE_RANGE_LY (≈ 100 AU) — those are gameplay
+  // states, not visual ones (closeStarMesh is on its own wider range).
+  if (closest && closest.dist < BRAKE_RANGE_LY) {
+    const distAu = closest.dist / LY_PER_AU;
     // Autobrake — clamp throttle to a sub-warp value, and disengage
     // autopilot if it was steering us here. SNAP rather than smooth: the
     // cubic speed law (s = throttle³·0.4) means a smoothed ramp from 1.0
@@ -940,21 +1230,17 @@ function tick() {
       observed.add(closest.star.id);
       void callTool(pane.app, "observe", { gameId, playerId, objectId: closest.star.id });
     }
-  } else {
-    closeStarMesh.visible = false;
   }
 
-  // Hide all three sprite layers for whichever star you're parked at —
-  // otherwise the halo, sized in world units, balloons to fill the
-  // entire viewport and reads as a giant bright square texture-quad
-  // sitting behind closeStarMesh. The trigger is being inside
-  // BRAKE_RANGE, NOT closeStarMesh.visible (which can be false if
-  // you've actually drifted inside the photosphere).
-  // (inSystemStarId is the same value we computed up by the planet loop
-  // for currentPlanets — recomputing here for clarity.)
-  const inSystemHideId = closest && closest.dist < BRAKE_RANGE_LY ? closest.star.id : null;
+  // Hide all three sprite layers for whichever star is being drawn as a
+  // sphere — otherwise the halo, sized in world units, balloons to fill
+  // the entire viewport and reads as a giant bright square texture-quad
+  // sitting behind closeStarMesh. Using CLOSE_MESH_RANGE_LY (not
+  // BRAKE_RANGE_LY) so the handoff between sprite and sphere happens at
+  // the same threshold.
+  const inSphereHideId = closest && closest.dist < CLOSE_MESH_RANGE_LY ? closest.star.id : null;
   for (const [id, layers] of starLayers) {
-    const hide = id === inSystemHideId;
+    const hide = id === inSphereHideId;
     layers.core.visible = !hide;
     layers.halo.visible = !hide;
     layers.spike.visible = !hide;
@@ -977,6 +1263,53 @@ function tick() {
     systemLight.visible = true;
   } else {
     systemLight.visible = false;
+  }
+
+  // Per-frame orbital LOD update — distant icon size + closeup habitat
+  // visibility. Icon uses the same min-pixel floor + max-pixel cap as
+  // star cores so it stays a readable point at any distance and never
+  // balloons to a screen-spanning blob when you're parked AT the
+  // orbital. The closeup ring geometry only swaps in within
+  // ORBITAL_CLOSEUP_RANGE_LY of the camera, AND only when the camera
+  // is OUTSIDE the ring — looking at a torus from inside its center
+  // wraps the additive inner strip around the viewport and washes out.
+  const ORBITAL_ICON_BASE = 0.0006;            // world units (ly)
+  const ORBITAL_ICON_MIN_PX = 6;
+  const ORBITAL_ICON_MAX_PX = 40;
+  const spinRate = 0.4;                         // rad/sec on inner ring
+  for (const layers of orbitalLayers.values()) {
+    const o = layers.data;
+    const dx = o.position[0] - ship.position.x;
+    const dy = o.position[1] - ship.position.y;
+    const dz = o.position[2] - ship.position.z;
+    const d = Math.hypot(dx, dy, dz);
+    const insideRing = d < o.ringRadius * 0.95;
+    const showHabitat = d < ORBITAL_CLOSEUP_RANGE_LY && !insideRing;
+    layers.habitat.visible = showHabitat;
+    if (showHabitat) {
+      // Scale the habitat group to the orbital's stored ringRadius (ly),
+      // and cross-fade the icon out inside the closeup band so we don't
+      // double-render. Spin the inner emissive strip on its axis.
+      layers.habitat.scale.setScalar(o.ringRadius);
+      layers.habitatInner.rotation.z += spinRate * dt;
+      // Icon fades to 0 across the inner half of the closeup band — the
+      // habitat geometry is now the dominant cue.
+      const fadeIn = Math.min(1, (ORBITAL_CLOSEUP_RANGE_LY - d) / (ORBITAL_CLOSEUP_RANGE_LY * 0.5));
+      (layers.icon.material as THREE.SpriteMaterial).opacity = 0.9 * (1 - fadeIn);
+    } else {
+      // Icon stays on. When the camera is inside the ring the habitat
+      // is hidden, so the icon is the only "you are here" marker —
+      // keep it visible at full opacity.
+      (layers.icon.material as THREE.SpriteMaterial).opacity = 0.9;
+    }
+    // Icon scale: max(physical, min-pixel-floor) but capped to a hard
+    // pixel ceiling. Without the cap, ORBITAL_ICON_BASE = 0.0006 ly at
+    // 0.00001 ly distance is 60× viewport — bloom turns the frame to
+    // flat white. Same pattern as the star CORE_MAX_PX.
+    const minR = (ORBITAL_ICON_MIN_PX * d * 1.4) / canvasH;
+    const maxR = (ORBITAL_ICON_MAX_PX * d * 1.4) / canvasH;
+    const r = Math.min(maxR, Math.max(ORBITAL_ICON_BASE, minR));
+    layers.icon.scale.set(r, r, 1);
   }
 
   const speed = Math.pow(ship.throttle, 3) * 0.4;
@@ -1035,17 +1368,13 @@ function updateHud(fwd: THREE.Vector3) {
   } else {
     targetTag.style.display = "none";
   }
+  const tgt = resolveTargetPosition(ship.targetId);
   hudTarget.textContent = ship.targetId
-    ? `target: ${stars.find((s) => s.id === ship.targetId)?.name ?? "?"} ${ship.warpEngaged ? "(warping)" : ""}`
+    ? `target: ${tgt?.name ?? "?"}${tgt?.isOrbital ? " ⟜" : ""} ${ship.warpEngaged ? "(warping)" : ""}`
     : "no target";
-  if (ship.targetId) {
-    const tStar = stars.find((s) => s.id === ship.targetId);
-    if (tStar) {
-      const d = new THREE.Vector3(...tStar.position).distanceTo(ship.position);
-      hudDistance.textContent = `${formatDistance(d)} to target`;
-    } else {
-      hudDistance.textContent = "—";
-    }
+  if (tgt) {
+    const d = new THREE.Vector3(...tgt.pos).distanceTo(ship.position);
+    hudDistance.textContent = `${formatDistance(d)} to target`;
   } else {
     hudDistance.textContent = "—";
   }

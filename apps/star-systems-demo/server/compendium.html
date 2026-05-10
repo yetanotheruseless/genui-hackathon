@@ -21,8 +21,18 @@
 
       ul { list-style:none; margin:0; padding:0; }
       ul#disc li { padding:3px 5px; border:1px solid var(--line); border-radius:3px; margin-bottom:3px; color: var(--accent); }
-      ul#orbitals li { padding:3px 5px; border:1px solid var(--orbital); border-radius:3px; margin-bottom:3px; color: var(--orbital); }
-      ul#orbitals li .builder { color: var(--dim); font-size: 10px; margin-left: 6px; }
+      ul#orbitals li { padding:5px 6px; border:1px solid var(--orbital); border-radius:3px; margin-bottom:4px; color: var(--orbital); display:flex; flex-direction:column; gap:3px; }
+      ul#orbitals li.docked { border-color: var(--mind); background: rgba(255, 210, 138, 0.06); }
+      ul#orbitals li .row1 { display:flex; align-items:center; gap:6px; }
+      ul#orbitals li .name { font-weight: 600; }
+      ul#orbitals li .builder { color: var(--dim); font-size: 10px; }
+      ul#orbitals li .occupants { color: var(--mind); font-size: 10px; margin-left: auto; }
+      ul#orbitals li .desc { color: var(--ink); font-size: 11px; opacity: 0.85; line-height: 1.35; }
+      ul#orbitals li .actions { display:flex; gap:4px; }
+      ul#orbitals li button { background:#1a2436; color:var(--orbital); border:1px solid var(--orbital); padding:2px 8px; border-radius:3px; cursor:pointer; font:inherit; font-size:10px; }
+      ul#orbitals li button.dock { color: var(--mind); border-color: var(--mind); }
+      ul#orbitals li button.leave { color: var(--other); border-color: var(--other); }
+      ul#orbitals li button:disabled { opacity: 0.4; cursor: default; }
       ul#others li { padding:3px 5px; border:1px solid var(--other); border-radius:3px; margin-bottom:3px; color: var(--other); }
       ul#others li .dist { color: var(--dim); font-size: 10px; margin-left: 6px; }
       ul#chat { font-size: 11px; }
@@ -30,9 +40,11 @@
       ul#chat li .from { color: var(--mind); font-style: italic; margin-right: 6px; }
       .empty-tag { color: var(--dim); font-style: italic; padding-left: 4px; }
 
-      .build-form { margin-top: 6px; display:flex; gap:6px; align-items:center; }
-      .build-form input { flex:1; background:#0a1422; border:1px solid var(--line); color:var(--ink); padding:4px 6px; border-radius:3px; font:inherit; }
-      .build-form button { background:#1a2436; color:var(--orbital); border:1px solid var(--orbital); padding:4px 8px; border-radius:3px; cursor:pointer; font:inherit; }
+      .build-form { margin-top: 6px; display:flex; flex-direction:column; gap:5px; }
+      .build-form .row { display:flex; gap:6px; align-items:center; }
+      .build-form input, .build-form textarea { flex:1; background:#0a1422; border:1px solid var(--line); color:var(--ink); padding:4px 6px; border-radius:3px; font:inherit; }
+      .build-form textarea { resize: vertical; min-height: 48px; line-height: 1.4; }
+      .build-form button { background:#1a2436; color:var(--orbital); border:1px solid var(--orbital); padding:4px 8px; border-radius:3px; cursor:pointer; font:inherit; align-self:flex-start; }
       .hint { color: var(--dim); font-size: 11px; margin-top: 4px; }
     </style>
   </head>
@@ -60,10 +72,17 @@
       <h3>Orbitals built</h3>
       <ul id="orbitals"></ul>
       <div class="build-form">
-        <input id="orbital-name" placeholder="orbital name (e.g. Phage)" maxlength="60" />
-        <button id="build-btn" disabled>build here</button>
+        <div class="row">
+          <input id="orbital-name" placeholder="orbital name (e.g. Phage)" maxlength="60" />
+          <button id="build-btn" disabled>build here</button>
+        </div>
+        <textarea
+          id="orbital-description"
+          placeholder="builder's notes — why this orbital exists, what to find aboard, signature flourishes (visible to anyone who docks)"
+          maxlength="2000"
+        ></textarea>
       </div>
-      <div class="hint">Builds an Orbital at your current position; visible to every Mind in this galaxy.</div>
+      <div class="hint">Builds an Orbital at your current position; visible to every Mind in this galaxy. Click an orbital's <b>warp</b> to head there — your ship auto-docks on arrival.</div>
 
       <h3>Other Minds in this volume</h3>
       <ul id="others"></ul>
