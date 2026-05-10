@@ -68,6 +68,41 @@
 
       .typing { color: var(--dim); font-size: 11px; padding: 4px 12px; font-style: italic; }
       .typing.hidden { display: none; }
+
+      /* Docked-aboard banner — only visible when player.dockedOrbitalId is set.
+         Sits between header and log; shows builder + description as a quoted
+         note. Color shifts from the bridge's mind-amber palette to a violet
+         that matches the orbital marker. */
+      #docked-banner {
+        display: none;
+        margin: 6px 10px 0;
+        padding: 8px 10px;
+        border: 1px solid #9c6cff;
+        border-radius: 6px;
+        background: linear-gradient(180deg, rgba(156, 108, 255, 0.10), rgba(156, 108, 255, 0.02));
+      }
+      #docked-banner.visible { display: block; }
+      #docked-banner .title {
+        font-family: ui-monospace, monospace;
+        color: #c4a3ff;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: .12em;
+        margin-bottom: 2px;
+      }
+      #docked-banner .name { color: #ffffff; font-weight: 600; }
+      #docked-banner .builder { color: var(--dim); font-size: 11px; margin-left: 6px; font-family: ui-monospace, monospace; }
+      #docked-banner .desc {
+        margin-top: 6px;
+        white-space: pre-wrap;
+        line-height: 1.5;
+        color: var(--ink);
+        font-size: 12px;
+        border-left: 2px solid #9c6cff;
+        padding-left: 10px;
+      }
+      #docked-banner .desc.empty { color: var(--dim); font-style: italic; border-left-color: var(--line); }
+      #docked-banner .occupants { color: var(--mind); font-size: 11px; margin-top: 6px; font-family: ui-monospace, monospace; }
     </style>
   </head>
   <body>
@@ -78,6 +113,11 @@
       <span style="color: var(--dim); font-family: ui-monospace, monospace; font-size:11px" id="ship-class">—</span>
       <span class="tagline" id="tagline">—</span>
     </header>
+    <div id="docked-banner">
+      <div class="title">aboard orbital <span class="name" id="docked-name">—</span><span class="builder" id="docked-builder"></span></div>
+      <div class="desc empty" id="docked-desc">— builder left no notes —</div>
+      <div class="occupants" id="docked-occupants"></div>
+    </div>
     <div id="log"></div>
     <div class="typing hidden" id="typing">the Mind is thinking…</div>
     <footer>

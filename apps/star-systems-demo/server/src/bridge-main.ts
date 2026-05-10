@@ -16,6 +16,11 @@ const logEl = document.getElementById("log") as HTMLDivElement;
 const inputEl = document.getElementById("input") as HTMLTextAreaElement;
 const sendBtn = document.getElementById("send") as HTMLButtonElement;
 const typingEl = document.getElementById("typing") as HTMLDivElement;
+const dockedBanner = document.getElementById("docked-banner") as HTMLDivElement;
+const dockedNameEl = document.getElementById("docked-name") as HTMLElement;
+const dockedBuilderEl = document.getElementById("docked-builder") as HTMLElement;
+const dockedDescEl = document.getElementById("docked-desc") as HTMLElement;
+const dockedOccupantsEl = document.getElementById("docked-occupants") as HTMLElement;
 
 const pane = setupPaneApp("Culture Bridge");
 let gameId = "";
@@ -108,4 +113,34 @@ poll(800, async () => {
     seen.add(line.id);
     appendTurn(line);
   }
+  renderDockedBanner(state.dockedOrbitalId, state.galaxy?.orbitals || []);
 });
+
+function renderDockedBanner(dockedOrbitalId: string | null | undefined, orbitals: any[]) {
+  if (!dockedOrbitalId) {
+    dockedBanner.classList.remove("visible");
+    return;
+  }
+  const orbital = orbitals.find((o) => o.id === dockedOrbitalId);
+  if (!orbital) {
+    // We're nominally docked but the orbital is no longer in the
+    // shared list (deletion / new game). Hide rather than show stale.
+    dockedBanner.classList.remove("visible");
+    return;
+  }
+  dockedBanner.classList.add("visible");
+  dockedNameEl.textContent = orbital.name;
+  dockedBuilderEl.textContent = ` — built by ${orbital.builderShipName}`;
+  const desc = (orbital.description ?? "").trim();
+  if (desc) {
+    dockedDescEl.textContent = desc;
+    dockedDescEl.classList.remove("empty");
+  } else {
+    dockedDescEl.textContent = "— builder left no notes —";
+    dockedDescEl.classList.add("empty");
+  }
+  const occupants = orbital.dockedPlayerIds?.length ?? 0;
+  dockedOccupantsEl.textContent = occupants > 1
+    ? `${occupants} Minds aboard`
+    : occupants === 1 ? "alone aboard" : "";
+}
