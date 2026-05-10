@@ -165,9 +165,9 @@ const renderPass = new RenderPass(scene, camera);
 composer.addPass(renderPass);
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(1, 1),  // resized in resize()
-  0.55,   // strength
-  0.35,   // radius
-  0.7,    // threshold — only the brightest cores contribute
+  0.35,   // strength
+  0.3,    // radius
+  0.92,   // threshold — only fully-saturated highlights bloom
 );
 composer.addPass(bloomPass);
 
@@ -630,7 +630,7 @@ function createOrbitalLayers(o: OrbitalLite): OrbitalLayers {
     new THREE.MeshBasicMaterial({
       color: tint,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.45,
       side: THREE.DoubleSide,
       fog: false,
       depthWrite: false,
@@ -952,11 +952,13 @@ function buildBrightStars(bright: BrightTuple[]) {
   geometry.setAttribute("size",     new THREE.BufferAttribute(sizes,     1));
 
   // Custom shader: per-vertex point size, circular alpha falloff so the
-  // GL_POINT square is invisible.
+  // GL_POINT square is invisible. NormalBlending (not additive) so 17k
+  // points across the celestial sphere don't stack into a uniform cream
+  // wash that bloom then amplifies into white-out.
   const material = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.NormalBlending,
     vertexColors: true,
     vertexShader: `
       attribute float size;
