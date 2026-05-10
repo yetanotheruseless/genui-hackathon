@@ -52,6 +52,13 @@ const STAR_VISUAL_SCALE = 200;
 // inside that distance perspective would make it screen-spanning. The
 // cap keeps the sphere at a sane size and lets you fly "through" it.
 const STAR_MAX_SCREEN_FRAC = 0.25;
+// Halo sizing — shared between the SPRITE halo (far stars) and the
+// closeStarMesh halo (in-system). Same formula on both sides means the
+// halo doesn't visibly jump at the sprite↔sphere handoff. The cap is
+// what dominates at any reasonable distance (a 7× of a 60-px sphere is
+// ~420 px, the cap pegs that to ~315 px / 36% viewport).
+const STAR_HALO_RATIO = 7.0;
+const STAR_HALO_MAX_SCREEN_FRAC = 0.18;
 
 const PLANET_RADIUS_R_EARTH: Record<string, number> = {
   terrestrial: 0.9,
@@ -1163,8 +1170,8 @@ function tick() {
   // place to gate the halo + spike behind a visibility / distance test.
   const STAR_MIN_PX = 1.5;
   const CORE_MAX_PX = 60;             // sprite core hard cap (lets closeStarMesh take over)
-  const HALO_RATIO = 7.0;             // halo radius = HALO_RATIO × core radius
-  const HALO_MAX_SCREEN_FRAC = 0.18;  // halo angular radius cap (NDC fraction)
+  const HALO_RATIO = STAR_HALO_RATIO;             // shared with closeStarMesh halo
+  const HALO_MAX_SCREEN_FRAC = STAR_HALO_MAX_SCREEN_FRAC;  // shared with closeStarMesh halo
   const SPIKE_BASE_PX = 28;           // pixel-size of spike for a G dwarf core
   for (const layers of starLayers.values()) {
     const ud = layers.core.userData as { baseSize?: number };
@@ -1266,10 +1273,12 @@ function tick() {
     // inside the actual star, not just inside the inflated geometry.
     closeStarMesh.visible = closest.dist > trueRadiusLy;
 
-    // Halo follows the rendered mesh radius (which is already capped),
-    // 1.8× scale. Tinted, additive.
+    // Halo: same formula as the sprite halo so the apparent size is
+    // identical at the sprite↔sphere handoff (CLOSE_MESH_RANGE_LY).
+    // Without this the halo visibly snaps when crossing the boundary.
     closeStarHalo.position.set(...closest.star.position);
-    const haloR = radiusLy * 1.8;
+    const haloMaxWorld = STAR_HALO_MAX_SCREEN_FRAC * closest.dist * 1.4;
+    const haloR = Math.min(radiusLy * STAR_HALO_RATIO, haloMaxWorld);
     closeStarHalo.scale.set(haloR, haloR, 1);
     (closeStarHalo.material as THREE.SpriteMaterial).color.setHex(tint);
     closeStarHalo.visible = closeStarMesh.visible;
