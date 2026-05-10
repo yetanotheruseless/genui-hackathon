@@ -21,6 +21,7 @@ import path from "node:path";
 type GalaxyLike = {
   gameId: string;
   seed: number;
+  createdAt: number;
   players: Map<string, unknown>;
   orbitals: unknown[];
   publicChat: unknown[];
@@ -57,6 +58,7 @@ export function openPersistence(): void {
 export function loadAllGalaxies(): Array<{
   gameId: string;
   seed: number;
+  createdAt?: number;
   players: Record<string, unknown>;
   orbitals: unknown[];
   publicChat: unknown[];
@@ -88,6 +90,7 @@ export function snapshotAll(galaxies: Map<string, GalaxyLike>): void {
       const serializable = {
         gameId: g.gameId,
         seed: g.seed,
+        createdAt: g.createdAt,
         players: Object.fromEntries(g.players),
         orbitals: g.orbitals,
         publicChat: g.publicChat,

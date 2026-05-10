@@ -206,6 +206,9 @@ type PublicMessage = { id: string; fromPlayerId: string; fromShipName: string; t
 type Galaxy = {
   gameId: string;
   seed: number;
+  /** Wall-clock timestamp of first creation (ms). Used by the lobby to
+   *  sort the games list and show "created N minutes ago". */
+  createdAt: number;
   players: Map<string, Player>;
   orbitals: Orbital[];
   publicChat: PublicMessage[];
@@ -226,6 +229,7 @@ export function getGalaxies(): Map<string, Galaxy> {
 export function hydrateGalaxy(snap: {
   gameId: string;
   seed: number;
+  createdAt?: number;
   players: Record<string, Player>;
   orbitals: Orbital[];
   publicChat: PublicMessage[];
@@ -235,6 +239,9 @@ export function hydrateGalaxy(snap: {
   galaxies.set(snap.gameId, {
     gameId: snap.gameId,
     seed: snap.seed,
+    // Backfill for snapshots predating createdAt (use earliest event ts
+    // as a best-effort proxy, falling back to "now").
+    createdAt: snap.createdAt ?? snap.events?.[0]?.ts ?? Date.now(),
     players: new Map(Object.entries(snap.players ?? {})),
     orbitals: snap.orbitals ?? [],
     publicChat: snap.publicChat ?? [],
@@ -278,6 +285,7 @@ function getOrCreateGalaxy(gameId: string | undefined, seed: number): Galaxy {
   const galaxy: Galaxy = {
     gameId: gameId ?? randomUUID(),
     seed,
+    createdAt: Date.now(),
     players: new Map(),
     orbitals: [],
     publicChat: [],
@@ -552,6 +560,7 @@ NO markdown fences. NO commentary outside the JSON.`;
 // ---------------------------------------------------------------------------
 
 const URI = {
+  lobby:      "ui://stars/lobby.html",
   cockpit:    "ui://stars/cockpit.html",
   compendium: "ui://stars/compendium.html",
   bridge:     "ui://stars/bridge.html",
@@ -560,6 +569,7 @@ const URI = {
 // Slot hint for MCP Apps hosts that support a fixed multi-pane layout
 // (e.g. apps/cockpit). Goose-desktop ignores this and renders inline.
 const SLOT = {
+  [URI.lobby]:      "viewport",
   [URI.cockpit]:    "viewport",
   [URI.compendium]: "side",
   [URI.bridge]:     "bottom",
@@ -592,6 +602,7 @@ function registerPaneResource(server: McpServer, name: string, uri: string, file
 export function createServer(): McpServer {
   const server = new McpServer({ name: "Culture Contact (MCP Apps)", version: "0.3.0" });
 
+  registerPaneResource(server, "Lobby",      URI.lobby,      "lobby.html");
   registerPaneResource(server, "Cockpit",    URI.cockpit,    "cockpit.html");
   registerPaneResource(server, "Compendium", URI.compendium, "compendium.html");
   registerPaneResource(server, "Bridge",     URI.bridge,     "bridge.html");
@@ -686,6 +697,57 @@ export function createServer(): McpServer {
           }),
         }],
       };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "open_lobby",
+    {
+      title: "Open the game lobby",
+      description:
+        "Show the lobby pane: list of existing galaxies (with player + orbital counts) and a " +
+        "form for joining or starting a new game with a chosen ship class and Mind. " +
+        "From the lobby, the player picks a galaxy and the lobby asks the LLM to call " +
+        "`start_starship` with the right gameId/mind_id/ship_class — which mounts the cockpit.",
+      inputSchema: {},
+      _meta: uiMeta(URI.lobby),
+    },
+    async () => ({
+      content: [{
+        type: "text",
+        text: JSON.stringify({ kind: "lobby_init" }),
+      }],
+    }),
+  );
+
+  registerAppTool(
+    server,
+    "list_galaxies",
+    {
+      title: "List existing galaxies",
+      description:
+        "Return summaries of every active galaxy on this server: gameId, createdAt, " +
+        "player and orbital counts, and per-player ship name + Mind. Used by the lobby pane.",
+      inputSchema: {},
+      _meta: uiMeta(URI.lobby),
+    },
+    async () => {
+      const list = [...galaxies.values()].map((g) => ({
+        gameId: g.gameId,
+        createdAt: g.createdAt,
+        seed: g.seed,
+        playerCount: g.players.size,
+        orbitalCount: g.orbitals.length,
+        players: [...g.players.values()].map((p) => ({
+          shipName: p.shipName,
+          shipClass: p.shipClass,
+          mindId: p.mind.id,
+          mindName: p.mind.name,
+        })),
+      }));
+      list.sort((a, b) => b.createdAt - a.createdAt);
+      return { content: [{ type: "text", text: JSON.stringify({ galaxies: list }) }] };
     },
   );
 
