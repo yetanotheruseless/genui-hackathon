@@ -634,14 +634,24 @@ function tick() {
   }
 
   // ---- In-system effects ----
-  // Find the nearest star (excluding stars at exactly the camera's
-  // position which would be a degenerate self-distance of 0).
+  // Find the nearest star NOW *and* one frame from now. At max warp we
+  // cover ~420 AU per frame, which is 4× the 100-AU brake range — so a
+  // pure "what's closest right now" check can step right over the cordon
+  // in a single frame. We also evaluate at predicted next-frame position
+  // and trip the brake on whichever sample is closer.
+  const speedNow = Math.pow(ship.throttle, 3) * 0.4;
+  const nextPos = ship.position.clone().addScaledVector(fwd, speedNow * dt);
   let closest: { star: StarLite; dist: number } | null = null;
   for (const s of stars) {
     const dx = s.position[0] - ship.position.x;
     const dy = s.position[1] - ship.position.y;
     const dz = s.position[2] - ship.position.z;
-    const d = Math.hypot(dx, dy, dz);
+    const dNow = Math.hypot(dx, dy, dz);
+    const ndx = s.position[0] - nextPos.x;
+    const ndy = s.position[1] - nextPos.y;
+    const ndz = s.position[2] - nextPos.z;
+    const dNext = Math.hypot(ndx, ndy, ndz);
+    const d = Math.min(dNow, dNext);
     if (closest === null || d < closest.dist) closest = { star: s, dist: d };
   }
 
@@ -730,10 +740,14 @@ function tick() {
     currentPlanets = live;
 
     // Autobrake — clamp throttle to a sub-warp value, and disengage
-    // autopilot if it was steering us here.
+    // autopilot if it was steering us here. SNAP rather than smooth: the
+    // cubic speed law (s = throttle³·0.4) means a smoothed ramp from 1.0
+    // to 0.025 takes ~10 frames, during which we'd cover 2000+ AU and
+    // fly clean through the system. A hard clamp is the only way to keep
+    // the ship inside the cordon.
     const cap = maxImpulseThrottle(distAu);
     if (ship.throttle > cap) {
-      ship.throttle = ship.throttle * 0.88 + cap * 0.12;  // smooth deceleration
+      ship.throttle = cap;
       throttleEl.value = ship.throttle.toString();
     }
     if (ship.warpEngaged) ship.warpEngaged = false;
