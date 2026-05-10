@@ -137,6 +137,7 @@ export function mindContextBlock(args: {
   compendiumSummary: string;
   nearbyPlayers: { shipName: string; mindName: string; distance: number }[];
   orbitals: { name: string; near?: string; builderShip?: string }[];
+  pinnedStars?: { id: string; name: string; spectralType: string; distanceLy?: number; planetSummary?: string }[];
 }): string {
   const lines: string[] = [];
   lines.push(`Ship: ${args.shipName} (${args.shipClass})`);
@@ -164,5 +165,37 @@ export function mindContextBlock(args: {
       lines.push(`  - ${p.shipName} (Mind: ${p.mindName}) — ${p.distance.toFixed(2)} ly`);
     }
   }
+  if (args.pinnedStars && args.pinnedStars.length) {
+    lines.push(`Stars you (the Mind) have pinned for the crew's attention:`);
+    for (const s of args.pinnedStars) {
+      const dist = s.distanceLy != null ? ` — ${s.distanceLy.toFixed(2)} ly` : "";
+      const planets = s.planetSummary ? ` · ${s.planetSummary}` : "";
+      lines.push(`  - ${s.name} (id=${s.id}, ${s.spectralType})${dist}${planets}`);
+    }
+  }
   return lines.join("\n");
+}
+
+/**
+ * Augments the Mind's system prompt with awareness of catalog tools.
+ * Used by talk_to_mind so the Mind knows it can search the wider catalog
+ * and pin stars onto the cockpit list rather than just guess.
+ */
+export function mindCatalogToolsBlock(): string {
+  return `
+CATALOG TOOLS YOU MAY CALL:
+- find_systems({hasPlanetKinds?, spectralClasses?, nearPosition?, maxDistanceLy?, sort?, requirePlanets?, excludeIds?, limit?}):
+    Search the unified HYG + NASA Exoplanet Archive catalog (~120k stars,
+    ~6.3k known planets). Useful when the crew asks for a kind of star or
+    system you wouldn't have in the curated set. Sorts default to nearest.
+- pin_star({star_id}):
+    Mark a star as pinned for this player. The cockpit renders pinned
+    stars distinctly and they show up in the right-side list. Use after
+    find_systems when you've decided what's worth pointing at.
+- unpin_star({star_id}): Removes a pin.
+- clear_pinned(): Remove all pins.
+
+When you call these, you can keep talking afterwards in the same turn —
+mention what you found and what you pinned, in your voice. Don't read
+back JSON; describe the results like a Mind would.`;
 }
