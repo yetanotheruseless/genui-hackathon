@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Starship · Overview</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #04060a;
+        --line: #202a3d;
+        --line-strong: #2a3a55;
+        --ink: #cfd6e6;
+        --dim: #6f7689;
+        --accent: #7ad7ff;
+        --star: #ffd28a;
+        --planet: #6ba2e0;
+        --orbital: #9c6cff;
+        --ship: #88ffd9;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%;
+        background: var(--bg); color: var(--ink);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+      }
+      body { display: flex; flex-direction: column; }
+
+      header {
+        padding: 5px 8px;
+        border-bottom: 1px solid var(--line);
+        color: var(--dim);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        flex-shrink: 0;
+      }
+      header .ship {
+        color: var(--star);
+        font-style: italic;
+        font-weight: 600;
+        text-transform: none;
+        letter-spacing: 0;
+      }
+      header .right {
+        margin-left: auto;
+        color: var(--ink);
+        text-transform: none;
+        letter-spacing: 0;
+      }
+
+      /* Filter row — Eve-style chip buttons that toggle which categories appear. */
+      #filters {
+        display: flex;
+        gap: 4px;
+        padding: 5px 8px;
+        border-bottom: 1px solid var(--line);
+        flex-shrink: 0;
+      }
+      .chip {
+        background: transparent;
+        color: var(--dim);
+        border: 1px solid var(--line);
+        padding: 3px 8px;
+        border-radius: 3px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .chip:hover { color: var(--ink); border-color: var(--line-strong); }
+      .chip.active {
+        background: rgba(122, 215, 255, 0.08);
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+
+      /* Table — sticky header, scrollable body. */
+      .table-wrap {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11px;
+      }
+      thead th {
+        position: sticky;
+        top: 0;
+        background: var(--bg);
+        text-align: left;
+        font-weight: 600;
+        color: var(--dim);
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        padding: 5px 8px;
+        border-bottom: 1px solid var(--line-strong);
+        cursor: pointer;
+        user-select: none;
+      }
+      thead th:hover { color: var(--ink); }
+      thead th.sort-active { color: var(--accent); }
+      thead th.sort-active::after { content: " ▾"; font-size: 8px; }
+      thead th.sort-active.asc::after { content: " ▴"; }
+
+      tbody tr {
+        border-bottom: 1px dotted var(--line);
+        cursor: pointer;
+      }
+      tbody tr:hover { background: rgba(122, 215, 255, 0.04); }
+      tbody tr.target { background: rgba(255, 210, 138, 0.08); }
+      tbody td {
+        padding: 4px 8px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      tbody td.icon { width: 16px; padding-right: 0; font-size: 12px; text-align: center; }
+      tbody td.name { color: var(--ink); font-weight: 600; }
+      tbody td.kind { color: var(--dim); }
+      tbody td.dist { text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
+      tbody td.parent { color: var(--dim); font-style: italic; }
+
+      /* Type-specific row tints */
+      tr.kind-star td.icon { color: var(--star); }
+      tr.kind-planet td.icon { color: var(--planet); }
+      tr.kind-orbital td.icon { color: var(--orbital); }
+      tr.kind-ship td.icon { color: var(--ship); }
+
+      .empty-row {
+        padding: 24px 8px;
+        text-align: center;
+        color: var(--dim);
+        font-style: italic;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      OVERVIEW · <span class="ship" id="ship-name">—</span>
+      <span class="right" id="hud-pos">—</span>
+    </header>
+
+    <div id="filters">
+      <button class="chip active" data-filter="all">All</button>
+      <button class="chip" data-filter="star">Stars</button>
+      <button class="chip" data-filter="planet">Planets</button>
+      <button class="chip" data-filter="orbital">Orbitals</button>
+      <button class="chip" data-filter="ship">Ships</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="icon"></th>
+            <th data-sort="name">Name</th>
+            <th data-sort="kind">Type</th>
+            <th data-sort="parent">Parent</th>
+            <th data-sort="distance" class="sort-active asc" style="text-align:right">Distance</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+
+    <script type="module" src="/src/overview-main.ts"></script>
+  </body>
+</html>

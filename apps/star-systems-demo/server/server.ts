@@ -505,14 +505,19 @@ const URI = {
   cockpit:    "ui://stars/cockpit.html",
   compendium: "ui://stars/compendium.html",
   bridge:     "ui://stars/bridge.html",
+  overview:   "ui://stars/overview.html",
 } as const;
 
 // Slot hint for MCP Apps hosts that support a fixed multi-pane layout
 // (e.g. apps/cockpit). Goose-desktop ignores this and renders inline.
+// overview lives in its own slot so the store can hold both panes
+// simultaneously (the cockpit's SideArea component tabs between them
+// in the same physical area).
 const SLOT = {
   [URI.cockpit]:    "viewport",
   [URI.compendium]: "side",
   [URI.bridge]:     "bottom",
+  [URI.overview]:   "overview",
 } as const;
 
 type UiResourceUri = (typeof URI)[keyof typeof URI];
@@ -545,6 +550,7 @@ export function createServer(): McpServer {
   registerPaneResource(server, "Cockpit",    URI.cockpit,    "cockpit.html");
   registerPaneResource(server, "Compendium", URI.compendium, "compendium.html");
   registerPaneResource(server, "Bridge",     URI.bridge,     "bridge.html");
+  registerPaneResource(server, "Overview",   URI.overview,   "overview.html");
 
   // --- ENTRY tools ----------------------------------------------------
 
@@ -684,6 +690,69 @@ export function createServer(): McpServer {
           playerId: player.playerId,
           ship: { name: player.shipName, class: player.shipClass },
           mind: { id: player.mind.id, name: player.mind.name, tagline: player.mind.tagline },
+        }),
+      }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "set_target",
+    {
+      title: "Lock the cockpit reticle on a target without warping",
+      description:
+        "Sets player.targetId to an arbitrary id (star id, 'planet:starId::name', or 'orbital:id'). The cockpit reticle locks on the resolved position. Unlike warp_to, does NOT engage warp — useful for selecting a planet to navigate to manually, or holding a lock while the player flies on impulse.",
+      inputSchema: {
+        gameId: z.string(),
+        playerId: z.string(),
+        targetId: z.string().describe("Opaque target id. Star: 'sirius_a'. Planet: 'planet:sol::Earth'. Orbital: 'orbital:<uuid>'."),
+      },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const player = getPlayer(getGalaxy(args.gameId), args.playerId);
+      player.targetId = args.targetId;
+      // warpEngaged stays as-is — set_target is "lock without engage."
+      return { content: [{ type: "text", text: JSON.stringify({ kind: "target_set", targetId: args.targetId }) }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "open_overview",
+    {
+      title: "Open the EvE-style overview",
+      description: "Mount the overview iframe — filterable, distance-sorted table of stars, planets, orbitals.",
+      inputSchema: { gameId: z.string(), playerId: z.string() },
+      _meta: uiMeta(URI.overview),
+    },
+    async (args) => {
+      const galaxy = getGalaxy(args.gameId);
+      const player = getPlayer(galaxy, args.playerId);
+      return { content: [{
+        type: "text",
+        text: JSON.stringify({
+          kind: "overview_init",
+          gameId: galaxy.gameId,
+          playerId: player.playerId,
+          ship: { name: player.shipName, class: player.shipClass },
+          // Curated stars are the rows shown in the table. Omitting the
+          // 109k bright catalog: not actionable from the overview, would
+          // make the list useless. Each star carries its full planet
+          // list so the overview can also flatten planets into rows.
+          stars: STARS.map((s) => ({
+            id: s.id,
+            name: s.name,
+            position: s.position,
+            spectralClass: s.spectralClass,
+            spectralType: s.spectralType,
+            lumClass: s.lumClass,
+            distanceLy: s.distanceLy,
+            planets: s.planets?.map((p) => ({
+              name: p.name, kind: p.kind, orbitAU: p.orbitAU,
+              massEarths: p.massEarths, radiusEarths: p.radiusEarths,
+            })) ?? [],
+          })),
         }),
       }] };
     },

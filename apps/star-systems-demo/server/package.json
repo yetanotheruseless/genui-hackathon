@@ -8,9 +8,10 @@
     "build:cockpit": "cross-env INPUT=cockpit.html vite build",
     "build:compendium": "cross-env INPUT=compendium.html vite build",
     "build:bridge": "cross-env INPUT=bridge.html vite build",
-    "build:panes": "npm run build:cockpit && npm run build:compendium && npm run build:bridge",
+    "build:overview": "cross-env INPUT=overview.html vite build",
+    "build:panes": "npm run build:cockpit && npm run build:compendium && npm run build:bridge && npm run build:overview",
     "build": "tsc --noEmit && tsc -p tsconfig.server.json && npm run build:panes",
-    "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=cockpit.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=compendium.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=bridge.html vite build --watch\" \"tsx watch main.ts\"",
+    "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=cockpit.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=compendium.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=bridge.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=overview.html vite build --watch\" \"tsx watch main.ts\"",
     "start:stdio": "tsx main.ts --stdio"
   },
   "dependencies": {

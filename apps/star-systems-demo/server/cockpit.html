@@ -15,11 +15,51 @@
       #wrap { flex:1; position:relative; min-height:0; }
       canvas { display:block; width:100%; height:100%; }
 
-      /* HUD overlays */
-      .reticle { position:absolute; top:50%; left:50%; transform: translate(-50%, -50%); pointer-events:none; }
-      .reticle .ring { width:60px; height:60px; border:1px solid var(--accent); border-radius:50%; opacity:0.7; }
-      .reticle .center { position:absolute; top:50%; left:50%; width:6px; height:6px; transform:translate(-50%,-50%); background:var(--accent); border-radius:50%; box-shadow:0 0 8px var(--accent); }
-      .target-tag { position:absolute; top:calc(50% + 38px); left:50%; transform:translateX(-50%); background:rgba(4,6,10,.75); padding:3px 8px; border:1px solid var(--accent); border-radius:3px; color:var(--accent); white-space:nowrap; pointer-events:none; }
+      /* Target reticle — appears around the currently-locked target.
+         Box at the projected screen position; four 1px lines extending
+         from the box toward the viewport edges with a gap so they
+         don't overlap the body. Hidden by default; updateReticle()
+         per-frame in tick() shows + positions it. */
+      .target-reticle { position:absolute; inset:0; pointer-events:none; display:none; }
+      .target-reticle.visible { display:block; }
+      .target-reticle .box {
+        position:absolute;
+        border: 1.5px solid var(--accent);
+        border-radius: 3px;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 0 6px rgba(122,215,255,0.35), 0 0 12px rgba(122,215,255,0.15) inset;
+      }
+      /* When the target is off-screen the box clamps to the viewport
+         edge. Strip the box rendering and replace with a glowing dot
+         + brackets so it reads as "your target is over there." */
+      .target-reticle .box.edge {
+        border: none;
+        background: var(--accent);
+        border-radius: 50%;
+        box-shadow: 0 0 8px var(--accent), 0 0 18px rgba(122,215,255,0.4);
+        width: 14px !important;
+        height: 14px !important;
+      }
+      .target-reticle .line {
+        position: absolute;
+        background: var(--accent);
+        opacity: 0.55;
+      }
+      .target-reticle .line.v { width: 1px; }
+      .target-reticle .line.h { height: 1px; }
+      .target-reticle .label {
+        position: absolute;
+        transform: translateX(-50%);
+        background: rgba(4,6,10,0.75);
+        padding: 2px 7px;
+        border: 1px solid var(--accent);
+        border-radius: 3px;
+        color: var(--accent);
+        font-size: 10px;
+        white-space: nowrap;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
 
       .hud-bottom { position:absolute; left:0; right:0; bottom:0; padding:6px 10px; display:flex; gap:12px; align-items:center; background:rgba(4,6,10,.75); border-top:1px solid var(--line); }
       .throttle-wrap { flex:1; display:flex; align-items:center; gap:8px; }
@@ -31,14 +71,6 @@
       .label-block { display:flex; flex-direction:column; line-height:1.3; }
       .label-block .k { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
       .label-block .v { color:var(--ink); }
-
-      .nearest { position:absolute; right:8px; top:8px; background:rgba(4,6,10,.75); padding:4px 8px; border:1px solid var(--line); border-radius:3px; max-width:280px; z-index: 10; }
-      .nearest h3 { font-size:10px; color:var(--dim); margin:0 0 3px; text-transform:uppercase; letter-spacing:.1em; }
-      .nearest h3 + h3 { margin-top: 6px; }
-      .nearest ol { margin:0; padding:0 0 0 18px; font-size:11px; }
-      .nearest ol li { color:var(--ink); padding:1px 4px; border-radius:2px; }
-      .nearest ol li:hover { background: rgba(122,215,255,0.12); cursor: pointer; }
-      .nearest .planets { color:#c896ff; margin-left:4px; }
 
       /* Visible-on-screen event log so we can debug click behavior
          without opening Goose Desktop's DevTools. Toggle with `~`. */
@@ -62,7 +94,6 @@
       #debug-log .row { white-space: pre-wrap; }
       #debug-log .row.warn { color: var(--warn); }
       #debug-log.hidden { display: none; }
-      .nearest ol li.target { color:var(--accent); }
 
       #overlay { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; pointer-events:none; transition:opacity .25s; }
       #overlay.hidden { opacity:0; }
@@ -111,17 +142,15 @@
     <div id="wrap">
       <canvas id="canvas"></canvas>
       <div id="warp-overlay"></div>
-      <div class="reticle"><div class="ring"></div><div class="center"></div></div>
-      <div class="target-tag" id="target-tag" style="display:none"></div>
-      <div class="nearest">
-        <h3>Nearest stars</h3>
-        <ol id="nearest-list"></ol>
-        <h3>With known planets</h3>
-        <ol id="nearest-planet-list"></ol>
-        <h3 id="local-planets-header" style="display:none">Nearest planets</h3>
-        <ol id="local-planets-list" style="display:none"></ol>
+      <div class="target-reticle" id="target-reticle">
+        <div class="box" id="reticle-box"></div>
+        <div class="line v" id="reticle-line-top"></div>
+        <div class="line v" id="reticle-line-bottom"></div>
+        <div class="line h" id="reticle-line-left"></div>
+        <div class="line h" id="reticle-line-right"></div>
+        <div class="label" id="reticle-label"></div>
       </div>
-      <div id="overlay"><span>click + drag to look · throttle below · click reticle target to warp · click any star</span></div>
+      <div id="overlay"><span>click + drag to look · click any star or use the Overview to lock target</span></div>
       <div id="debug-log" class="hidden"></div>
       <div class="hud-bottom">
         <div class="throttle-wrap">

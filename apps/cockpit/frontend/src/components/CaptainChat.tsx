@@ -44,9 +44,10 @@ export function CaptainChat() {
         if (cancelled || !init) return;
         if (init.playerId) localStorage.setItem(lsKey, init.playerId);
         bindWsPlayer(init.gameId, init.playerId);
-        // Sequential, not Promise.all — three concurrent AppBridge.connect
+        // Sequential, not Promise.all — concurrent AppBridge.connect
         // calls on the same shared MCP Client race on shared notification
         // handler state. Sequencing dodges that.
+        await callTool("open_overview",   { gameId: init.gameId, playerId: init.playerId });
         await callTool("open_compendium", { gameId: init.gameId, playerId: init.playerId });
         await callTool("open_bridge",     { gameId: init.gameId, playerId: init.playerId });
       } catch (e) {

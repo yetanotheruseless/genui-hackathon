@@ -104,11 +104,17 @@ const hudTarget = document.getElementById("hud-target") as HTMLElement;
 const hudLlm = document.getElementById("hud-llm") as HTMLElement;
 const hudShip = document.getElementById("hud-ship") as HTMLElement | null;
 const hudMind = document.getElementById("hud-mind") as HTMLElement | null;
-const nearestList = document.getElementById("nearest-list") as HTMLOListElement;
-const nearestPlanetList = document.getElementById("nearest-planet-list") as HTMLOListElement;
-const localPlanetsList = document.getElementById("local-planets-list") as HTMLOListElement;
-const localPlanetsHeader = document.getElementById("local-planets-header") as HTMLElement;
-const targetTag = document.getElementById("target-tag") as HTMLElement;
+// Target reticle — replaces the old centered crosshair + target-tag.
+// Tracks ship.targetId per frame: projects its world position to screen,
+// positions the box around it, and stretches the four edge lines so
+// they leave a gap around the box. Hidden when no target is locked.
+const targetReticle = document.getElementById("target-reticle") as HTMLDivElement;
+const reticleBox = document.getElementById("reticle-box") as HTMLDivElement;
+const reticleLineTop = document.getElementById("reticle-line-top") as HTMLDivElement;
+const reticleLineBottom = document.getElementById("reticle-line-bottom") as HTMLDivElement;
+const reticleLineLeft = document.getElementById("reticle-line-left") as HTMLDivElement;
+const reticleLineRight = document.getElementById("reticle-line-right") as HTMLDivElement;
+const reticleLabel = document.getElementById("reticle-label") as HTMLDivElement;
 const warpOverlayEl = document.getElementById("warp-overlay") as HTMLElement | null;
 const debugLogEl = document.getElementById("debug-log") as HTMLElement | null;
 
@@ -797,109 +803,15 @@ throttleEl.addEventListener("input", () => {
   // (HUD continues to show it); click the same star again to re-engage.
   if (ship.warpEngaged) ship.warpEngaged = false;
 });
-warpBtn.addEventListener("click", () => { if (ship.hoveredId) engageWarp(ship.hoveredId); });
-
-// Pre-allocate the nearest-list rows ONCE. updateHud mutates these in
-// place each frame instead of recreating the DOM — see the long story
-// in the commit log; short version, stable rows = pointer events fire
-// reliably + zero DOM churn at 60Hz.
-const NEAREST_ROWS = 5;
-const NEAREST_PLANET_ROWS = 5;
-const LOCAL_PLANET_ROWS = 8;            // max for our biggest system (Sol/TRAPPIST-1)
-function makePool(parent: HTMLOListElement, count: number, title: string): HTMLLIElement[] {
-  const pool: HTMLLIElement[] = [];
-  for (let i = 0; i < count; i++) {
-    const li = document.createElement("li");
-    li.style.cursor = "pointer";
-    li.style.display = "none";
-    li.title = title;
-    parent.appendChild(li);
-    pool.push(li);
-  }
-  return pool;
-}
-const nearestRowPool = makePool(nearestList, NEAREST_ROWS, "click to face this star");
-const nearestPlanetRowPool = makePool(nearestPlanetList, NEAREST_PLANET_ROWS, "click to face this star");
-const localPlanetRowPool = makePool(localPlanetsList, LOCAL_PLANET_ROWS, "click to face this planet");
-
-// Live planet snapshot, rebuilt each tick when the ship is in-system.
-// updateHud reads from this to populate the "Nearest planets" rows;
-// the rendering loop in tick() also writes here so we don't recompute
-// orbit positions twice per frame.
-type LivePlanet = {
-  id: string;                            // "starId::planetName"
-  name: string;
-  kind: string;
-  starName: string;
-  position: [number, number, number];    // world coords (ly)
-  distFromShip: number;                  // ly
-};
-let currentPlanets: LivePlanet[] = [];
-
-const r = nearestList?.getBoundingClientRect?.();
-dbg(`nearestList found: ${!!nearestList}  rect: ${r?.width.toFixed(0)}x${r?.height.toFixed(0)} @ (${r?.x.toFixed(0)},${r?.y.toFixed(0)})  rows=${nearestRowPool.length}`);
-
-// Delegated handler. Now that rows are stable, plain `click` works fine
-// and is the right primitive for accessibility (Enter/Space on focus
-// also fires click). pointerdown bubbles too if you prefer instant
-// response — both are wired here.
-/** Resolve a row's `data-aim-target` attribute to a world position and
- *  set aimTarget. Format: "star:<id>" or "planet:<starId>::<planetName>". */
-function aimAtRowTarget(t: HTMLElement, kind: "click" | "pointerdown"): boolean {
-  const li = t.closest("li[data-aim-target]") as HTMLElement | null;
-  if (!li) return false;
-  const tag = li.dataset.aimTarget;
-  if (!tag) return false;
-  let position: [number, number, number] | null = null;
-  let label = tag;
-  if (tag.startsWith("star:")) {
-    const star = stars.find((s) => s.id === tag.slice(5));
-    if (star) { position = star.position; label = star.name; }
-  } else if (tag.startsWith("planet:")) {
-    const p = currentPlanets.find((p) => p.id === tag.slice(7));
-    if (p) { position = p.position; label = `${p.name} (${p.starName})`; }
-  }
-  if (!position) { dbg(`→ aim target ${tag} not resolvable`, "warn"); return false; }
-  ship.warpEngaged = false;
-  const { targetYaw, targetPitch } = headingTo(position, ship.position);
-  aimTarget = { yaw: targetYaw, pitch: targetPitch };
-  dbg(`(${kind}) aim → ${label}: yaw=${(targetYaw*180/Math.PI).toFixed(1)}° pitch=${(targetPitch*180/Math.PI).toFixed(1)}°`);
-  return true;
-}
-// Delegate on the parent `.nearest` div so clicks on either <ol> work.
-const nearestPanel = nearestList.parentElement!;
-nearestPanel.addEventListener("click", (e) => {
-  const t = e.target as HTMLElement;
-  if (aimAtRowTarget(t, "click")) e.stopPropagation();
-});
-nearestPanel.addEventListener("pointerdown", (e) => {
-  const t = e.target as HTMLElement;
-  if (aimAtRowTarget(t, "pointerdown")) {
-    e.stopPropagation();
-    e.preventDefault();
+warpBtn.addEventListener("click", () => {
+  // Re-engage warp on the currently locked target. ship.targetId is
+  // updated from server's player.targetId via the get_state poll, so
+  // this respects whatever the captain / overview / 3D-click last set.
+  if (ship.targetId && !ship.targetId.startsWith("orbital:")) {
+    void engageWarp(ship.targetId);
   }
 });
 
-// Capture-phase listener on document to detect clicks that never reached
-// our delegated handler — e.g. blocked by another element or a parent
-// that called stopPropagation.
-document.addEventListener("click", (e) => {
-  const t = e.target as HTMLElement;
-  if (t?.closest?.("#nearest-list")) {
-    dbg(`document.click in #nearest-list (capture): <${t.tagName.toLowerCase()}>`);
-  }
-}, true);
-
-// Pointerdown anywhere — helps reveal whether clicks on the list are
-// being routed to the canvas instead of the list.
-document.addEventListener("pointerdown", (e) => {
-  const t = e.target as HTMLElement;
-  if (t?.closest?.("#nearest-list")) {
-    dbg(`document.pointerdown in #nearest-list: <${t.tagName.toLowerCase()}>`);
-  } else if (t?.tagName === "CANVAS") {
-    // suppress noisy canvas pointerdowns — we only care about routing weirdness
-  }
-}, true);
 
 function pickStarUnderClick(clientX: number, clientY: number) {
   const rect = canvas.getBoundingClientRect();
@@ -961,6 +873,23 @@ function resolveTargetPosition(id: string | null): { pos: [number, number, numbe
     const o = orbitalLayers.get(oid)?.data;
     if (!o) return null;
     return { pos: o.position, isOrbital: true, name: o.name };
+  }
+  if (id.startsWith("planet:")) {
+    // Format: "planet:starId::planetName". Resolves to the planet's
+    // current world position (orbits, so live every frame). The mesh's
+    // position has already been updated this tick by the planet loop.
+    const rest = id.slice("planet:".length);
+    const sep = rest.indexOf("::");
+    if (sep < 0) return null;
+    const starId = rest.slice(0, sep);
+    const planetName = rest.slice(sep + 2);
+    const pm = planetMeshes.find((p) => p.starId === starId && p.planetName === planetName);
+    if (!pm) return null;
+    return {
+      pos: [pm.mesh.position.x, pm.mesh.position.y, pm.mesh.position.z],
+      isOrbital: false,
+      name: pm.planetName,
+    };
   }
   const s = stars.find((s) => s.id === id);
   return s ? { pos: s.position, isOrbital: false, name: s.name } : null;
@@ -1246,14 +1175,10 @@ function tick() {
     const haloFade = Math.min(1, coreR / (base * 0.5));
     (layers.halo.material as THREE.SpriteMaterial).opacity = 0.6 * haloFade;
   }
-  // Planet update + currentPlanets[] build for the nearest-planets list.
-  // currentPlanets is populated only for planets orbiting the in-system
-  // star (we don't want stars-down-the-galaxy planets cluttering the
-  // panel). Min-pixel clamp on planet radius mirrors the close-star
-  // logic — even Earth at 10 AU is sub-pixel without it.
-  const inSystemStarId = closest && closest.dist < BRAKE_RANGE_LY ? closest.star.id : null;
+  // Planet position update + min-pixel clamp on radius. The "nearest
+  // planets in-system" UI was moved to the Overview iframe, so we no
+  // longer accumulate a JS-side list here — just position + scale.
   const MIN_PLANET_PX = 3;
-  const live: LivePlanet[] = [];
   for (const pm of planetMeshes) {
     const phase = pm.phaseSeed + tNow * pm.phaseSpeed;
     const px = pm.starPos[0] + Math.cos(phase) * pm.orbitLy;
@@ -1268,18 +1193,7 @@ function tick() {
     const r = Math.max(pm.physicalR, minR);
     pm.mesh.scale.setScalar(r);
     pm.mesh.visible = r > minVisibleRadiusAt(dist);
-    if (pm.starId === inSystemStarId) {
-      live.push({
-        id: `${pm.starId}::${pm.planetName}`,
-        name: pm.planetName,
-        kind: pm.planetKind,
-        starName: pm.starName,
-        position: [px, py, pz],
-        distFromShip: dist,
-      });
-    }
   }
-  currentPlanets = live;
 
   // closeStarMesh activates whenever the closest star is within
   // CLOSE_MESH_RANGE_LY (≈ 0.1 ly, much wider than BRAKE_RANGE_LY).
@@ -1423,6 +1337,7 @@ function tick() {
   if (warpOverlayEl) warpOverlayEl.classList.toggle("active", inWarp);
 
   updateHud(fwd);
+  updateReticle();
   composer.render();
   requestAnimationFrame(tick);
 }
@@ -1446,28 +1361,9 @@ function updateHud(fwd: THREE.Vector3) {
   const dSol = ship.position.length();
   hudPos.textContent = dSol < 0.05 ? "at Sol" : `${dSol.toFixed(2)} ly from Sol`;
 
-  const ranked = stars
-    .map((s) => ({ star: s, dist: new THREE.Vector3(...s.position).distanceTo(ship.position) }))
-    .filter((e) => e.dist > 1e-10)  // exclude only the degenerate self-distance case
-    .sort((a, b) => a.dist - b.dist);
-
-  let hoveredId: string | null = null;
-  let bestAngle = 0.06;
-  for (const { star } of ranked.slice(0, 8)) {
-    const v = new THREE.Vector3(...star.position).sub(ship.position).normalize();
-    const angle = v.angleTo(fwd);
-    if (angle < bestAngle) { bestAngle = angle; hoveredId = star.id; }
-  }
-  ship.hoveredId = hoveredId;
-
-  if (hoveredId) {
-    const s = stars.find((s) => s.id === hoveredId)!;
-    const d = new THREE.Vector3(...s.position).distanceTo(ship.position);
-    targetTag.style.display = "";
-    targetTag.textContent = `${s.name} · ${s.spectralType} · ${formatDistance(d)}`;
-  } else {
-    targetTag.style.display = "none";
-  }
+  // Top-strip target / distance readouts. The nearest-stars/planets
+  // panels were moved to the Overview iframe — see SideArea in the
+  // cockpit frontend.
   const tgt = resolveTargetPosition(ship.targetId);
   hudTarget.textContent = ship.targetId
     ? `target: ${tgt?.name ?? "?"}${tgt?.isOrbital ? " ⟜" : ""} ${ship.warpEngaged ? "(warping)" : ""}`
@@ -1478,87 +1374,100 @@ function updateHud(fwd: THREE.Vector3) {
   } else {
     hudDistance.textContent = "—";
   }
+}
 
-  // Two stable row pools: top N nearest stars (any), and top N nearest
-  // stars-with-planets. The two lists may overlap and that's fine — a
-  // planet-bearing system shows up in both. Per-row mutation only.
-  const renderRow = (
-    li: HTMLLIElement,
-    star: StarLite,
-    dist: number,
-    showPlanetCount: boolean,
-  ) => {
-    const { targetYaw, targetPitch } = headingTo(star.position, ship.position);
-    const yawDelta = normalizeAngle(targetYaw - ship.yaw);
-    const pitchDelta = targetPitch - ship.pitch;
-    const dir = new THREE.Vector3(...star.position).sub(ship.position).normalize();
-    const angleRad = Math.acos(Math.max(-1, Math.min(1, dir.dot(fwd))));
-    const planetSuffix = showPlanetCount && star.planetCount
-      ? `<span class="planets">🪐 ${star.planetCount}</span>`
-      : "";
-    const head = `${star.name} · ${formatDistance(dist)} · ${headingGlyph(yawDelta, pitchDelta, angleRad)}`;
-    const html = planetSuffix ? `${head}${planetSuffix}` : head;
-    if (li.innerHTML !== html) li.innerHTML = html;
-    const aimTag = `star:${star.id}`;
-    if (li.dataset.aimTarget !== aimTag) li.dataset.aimTarget = aimTag;
-    const isTarget = star.id === ship.hoveredId;
-    if (li.classList.contains("target") !== isTarget) li.classList.toggle("target", isTarget);
-    if (li.style.display === "none") li.style.display = "";
-  };
-
-  const top = ranked.slice(0, NEAREST_ROWS);
-  for (let i = 0; i < NEAREST_ROWS; i++) {
-    const li = nearestRowPool[i];
-    if (i >= top.length) {
-      if (li.style.display !== "none") li.style.display = "none";
-      continue;
+// Per-frame target reticle. Projects the locked target's world position
+// to screen space, positions the box on it, and stretches the four edge
+// lines from the viewport edges toward the box (with a gap so they
+// don't overlap the body). When the target is off-screen but in front
+// of the camera, the box clamps to the viewport edge so you always see
+// where your locked target is. Hidden only when no target is locked or
+// the target is behind the camera.
+const _tgtVec = new THREE.Vector3();
+const _camFwd = new THREE.Vector3();
+function updateReticle() {
+  const tgt = resolveTargetPosition(ship.targetId);
+  if (!tgt) {
+    if (targetReticle.classList.contains("visible")) {
+      targetReticle.classList.remove("visible");
     }
-    renderRow(li, top[i].star, top[i].dist, true);
+    return;
   }
-
-  const planetRanked = ranked.filter((e) => (e.star.planetCount ?? 0) > 0).slice(0, NEAREST_PLANET_ROWS);
-  for (let i = 0; i < NEAREST_PLANET_ROWS; i++) {
-    const li = nearestPlanetRowPool[i];
-    if (i >= planetRanked.length) {
-      if (li.style.display !== "none") li.style.display = "none";
-      continue;
+  _tgtVec.set(tgt.pos[0], tgt.pos[1], tgt.pos[2]);
+  // Behind-camera check via dot product against camera forward.
+  camera.getWorldDirection(_camFwd);
+  const toTarget = _tgtVec.clone().sub(camera.position);
+  if (toTarget.dot(_camFwd) <= 0) {
+    if (targetReticle.classList.contains("visible")) {
+      targetReticle.classList.remove("visible");
     }
-    renderRow(li, planetRanked[i].star, planetRanked[i].dist, true);
+    return;
   }
-
-  // ---- Nearest planets (in-system) ----------------------------------
-  // Only visible when we're parked in a system that has known planets.
-  // Each row carries data-aim-target="planet:starId::name" for click-to-face.
-  const showLocal = currentPlanets.length > 0;
-  if (showLocal !== (localPlanetsHeader.style.display !== "none")) {
-    localPlanetsHeader.style.display = showLocal ? "" : "none";
-    localPlanetsList.style.display = showLocal ? "" : "none";
+  // Project to NDC, then to canvas pixels. Clamp to viewport with a
+  // padding so the box stays visible at the edge for off-screen targets.
+  const v = _tgtVec.clone().project(camera);
+  const W = canvas.clientWidth;
+  const H = canvas.clientHeight;
+  const PAD = 36;
+  const rawX = (v.x + 1) * 0.5 * W;
+  const rawY = (1 - v.y) * 0.5 * H;
+  const cx = Math.max(PAD, Math.min(W - PAD, rawX));
+  const cy = Math.max(PAD, Math.min(H - PAD, rawY));
+  // Off-screen tag — toggles the box's edge-arrow style. The clamped
+  // position above already keeps the box visible at the viewport edge;
+  // the class swap lets the CSS render it as a triangle pointing in
+  // the direction of the target instead of a plain box.
+  const offEdge = rawX !== cx || rawY !== cy;
+  reticleBox.classList.toggle("edge", offEdge);
+  // Lines and label hide when off-screen — only the edge-arrow box
+  // shows the direction. With the box at the viewport edge the four
+  // edge lines collapse to ~0 length and look like noise.
+  for (const ln of [reticleLineTop, reticleLineBottom, reticleLineLeft, reticleLineRight]) {
+    ln.style.display = offEdge ? "none" : "";
   }
-  if (showLocal) {
-    const sorted = [...currentPlanets].sort((a, b) => a.distFromShip - b.distFromShip);
-    for (let i = 0; i < LOCAL_PLANET_ROWS; i++) {
-      const li = localPlanetRowPool[i];
-      if (i >= sorted.length) {
-        if (li.style.display !== "none") li.style.display = "none";
-        continue;
-      }
-      const lp = sorted[i];
-      const { targetYaw, targetPitch } = headingTo(lp.position, ship.position);
-      const yawDelta = normalizeAngle(targetYaw - ship.yaw);
-      const pitchDelta = targetPitch - ship.pitch;
-      const dir = new THREE.Vector3(...lp.position).sub(ship.position).normalize();
-      const angleRad = Math.acos(Math.max(-1, Math.min(1, dir.dot(fwd))));
-      const kindShort = lp.kind.replace(/_/g, " ");
-      const html = `${lp.name} · <span class="planets">${kindShort}</span> · ${formatDistance(lp.distFromShip)} · ${headingGlyph(yawDelta, pitchDelta, angleRad)}`;
-      if (li.innerHTML !== html) li.innerHTML = html;
-      const aimTag = `planet:${lp.id}`;
-      if (li.dataset.aimTarget !== aimTag) li.dataset.aimTarget = aimTag;
-      if (li.style.display === "none") li.style.display = "";
-    }
-  } else {
-    for (const li of localPlanetRowPool) {
-      if (li.style.display !== "none") li.style.display = "none";
-    }
+  reticleLabel.style.display = offEdge ? "none" : "";
+  const BOX = 56;       // box edge in px
+  const GAP = 6;        // gap between box and edge lines
+  const half = BOX / 2;
+
+  reticleBox.style.left = `${cx}px`;
+  reticleBox.style.top = `${cy}px`;
+  reticleBox.style.width = `${BOX}px`;
+  reticleBox.style.height = `${BOX}px`;
+
+  // Vertical lines: from viewport edge inward to the box edge − gap.
+  const topLineH = Math.max(0, cy - half - GAP);
+  reticleLineTop.style.left = `${cx}px`;
+  reticleLineTop.style.top = "0";
+  reticleLineTop.style.height = `${topLineH}px`;
+
+  const bottomLineTop = cy + half + GAP;
+  const bottomLineH = Math.max(0, H - bottomLineTop);
+  reticleLineBottom.style.left = `${cx}px`;
+  reticleLineBottom.style.top = `${bottomLineTop}px`;
+  reticleLineBottom.style.height = `${bottomLineH}px`;
+
+  // Horizontal lines.
+  const leftLineW = Math.max(0, cx - half - GAP);
+  reticleLineLeft.style.left = "0";
+  reticleLineLeft.style.top = `${cy}px`;
+  reticleLineLeft.style.width = `${leftLineW}px`;
+
+  const rightLineLeft = cx + half + GAP;
+  const rightLineW = Math.max(0, W - rightLineLeft);
+  reticleLineRight.style.left = `${rightLineLeft}px`;
+  reticleLineRight.style.top = `${cy}px`;
+  reticleLineRight.style.width = `${rightLineW}px`;
+
+  // Label below the box.
+  const d = new THREE.Vector3(...tgt.pos).distanceTo(ship.position);
+  reticleLabel.style.left = `${cx}px`;
+  reticleLabel.style.top = `${cy + half + GAP + 2}px`;
+  const tag = `${tgt.name}${tgt.isOrbital ? " ⟜" : ""} · ${formatDistance(d)}`;
+  if (reticleLabel.textContent !== tag) reticleLabel.textContent = tag;
+
+  if (!targetReticle.classList.contains("visible")) {
+    targetReticle.classList.add("visible");
   }
 }
 
