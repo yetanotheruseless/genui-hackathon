@@ -1513,17 +1513,34 @@ function updateHud(fwd: THREE.Vector3) {
     .filter((e) => e.dist > 1e-10)  // exclude only the degenerate self-distance case
     .sort((a, b) => a.dist - b.dist);
 
-  let hoveredId: string | null = null;
-  let bestAngle = 0.06;
+  // Reticle-based hover: pick whichever star is closest in angle, AND
+  // separately whichever planet is closest in angle. The tooltip shows
+  // the closer of the two. ship.hoveredId stays star-only — that's
+  // what flows into engageWarp / sync_state and the server's warp_to
+  // tool, which doesn't understand planet ids; warping is still on the
+  // parent star.
+  let hoveredStarId: string | null = null;
+  let hoveredStarAngle = 0.06;
   for (const { star } of ranked.slice(0, 8)) {
     const v = new THREE.Vector3(...star.position).sub(ship.position).normalize();
     const angle = v.angleTo(fwd);
-    if (angle < bestAngle) { bestAngle = angle; hoveredId = star.id; }
+    if (angle < hoveredStarAngle) { hoveredStarAngle = angle; hoveredStarId = star.id; }
   }
-  ship.hoveredId = hoveredId;
+  let hoveredPlanet: LivePlanet | null = null;
+  let hoveredPlanetAngle = 0.06;
+  for (const p of currentPlanets) {
+    const v = new THREE.Vector3(...p.position).sub(ship.position).normalize();
+    const angle = v.angleTo(fwd);
+    if (angle < hoveredPlanetAngle) { hoveredPlanetAngle = angle; hoveredPlanet = p; }
+  }
+  ship.hoveredId = hoveredStarId;
 
-  if (hoveredId) {
-    const s = stars.find((s) => s.id === hoveredId)!;
+  if (hoveredPlanet && hoveredPlanetAngle <= hoveredStarAngle) {
+    const kindLabel = hoveredPlanet.kind.replace(/_/g, " ");
+    targetTag.style.display = "";
+    targetTag.textContent = `${hoveredPlanet.name} · ${kindLabel} · ${formatDistance(hoveredPlanet.distFromShip)} (orbits ${hoveredPlanet.starName})`;
+  } else if (hoveredStarId) {
+    const s = stars.find((s) => s.id === hoveredStarId)!;
     const d = new THREE.Vector3(...s.position).distanceTo(ship.position);
     targetTag.style.display = "";
     targetTag.textContent = `${s.name} · ${s.spectralType} · ${formatDistance(d)}`;
