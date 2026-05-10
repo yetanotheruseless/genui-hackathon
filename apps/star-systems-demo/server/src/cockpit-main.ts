@@ -42,6 +42,16 @@ const EARTH_RADIUS_LY = EARTH_RADIUS_AU * LY_PER_AU;
 // below human visual resolution, never visible. 200× makes Earth ~1° at
 // 1 AU, big enough to see and recognize without dominating the system.
 const PLANET_VISUAL_SCALE = 200;
+// Stars get the SAME multiplier so relative sizing is right — without
+// this, planets (200× cheat) appear larger than stars (1× true scale)
+// at the same viewing distance, which is backwards. The screen-fraction
+// cap below keeps Sol from filling the viewport when you're sub-AU.
+const STAR_VISUAL_SCALE = 200;
+// Hard ceiling on the rendered star sphere's apparent size, in viewport
+// fractions. With STAR_VISUAL_SCALE Sol's inflated radius is 0.93 AU —
+// inside that distance perspective would make it screen-spanning. The
+// cap keeps the sphere at a sane size and lets you fly "through" it.
+const STAR_MAX_SCREEN_FRAC = 0.25;
 
 const PLANET_RADIUS_R_EARTH: Record<string, number> = {
   terrestrial: 0.9,
@@ -1228,25 +1238,33 @@ function tick() {
   // and lets it grow smoothly as you approach — closes the visible gap
   // between the sprite and the in-system view.
   if (closest && closest.dist < CLOSE_MESH_RANGE_LY) {
-    // Real radius for proper-scale rendering, BUT also clamp to a
-    // minimum apparent size in pixels so M dwarfs / white dwarfs don't
-    // become subpixel ghosts. Stellar/atlas apps do this to keep tiny
-    // stars findable. Big stars (Betelgeuse) render at true scale
-    // because true scale already exceeds the floor.
+    // Star sphere radius:
+    //   physical  — real R☉ × SOL_RADIUS_LY × STAR_VISUAL_SCALE.
+    //               Same 200× cheat we use on planets, so Sol/Jupiter/
+    //               Earth keep their ~109/11/1 relative ratio.
+    //   minR      — pixel floor so distant stars stay visible (~4 px).
+    //   maxR      — viewport-fraction ceiling so close approaches don't
+    //               fill the screen (and so you can fly "through" the
+    //               inflated sphere — its world radius shrinks with
+    //               your distance, you never end up inside it).
     const trueRadiusLy = (closest.star.radiusSolar ?? 1.0) * SOL_RADIUS_LY;
+    const physicalLy = trueRadiusLy * STAR_VISUAL_SCALE;
     const MIN_PX = 4;
     const minRadiusLy = minRadiusForPx(MIN_PX, closest.dist);
-    const radiusLy = Math.max(trueRadiusLy, minRadiusLy);
+    const maxRadiusLy = STAR_MAX_SCREEN_FRAC * closest.dist * 1.4;
+    const radiusLy = Math.min(maxRadiusLy, Math.max(physicalLy, minRadiusLy));
     closeStarMesh.position.set(...closest.star.position);
     closeStarMesh.scale.setScalar(radiusLy);
     const tint = spectralColor(closest.star.spectralClass, closest.star.lumClass);
     (closeStarMesh.material as THREE.MeshBasicMaterial).color.setHex(tint);
-    closeStarMesh.visible = closest.dist > trueRadiusLy;  // hide if camera is inside the star's actual photosphere
+    // Photosphere check uses TRUE radius — only hide if camera is
+    // inside the actual star, not just inside the inflated geometry.
+    closeStarMesh.visible = closest.dist > trueRadiusLy;
 
-    // Halo follows the mesh: 6× the rendered radius, tinted, additive.
-    // Sized in world units so perspective handles the apparent-size scaling.
+    // Halo follows the rendered mesh radius (which is already capped),
+    // 1.8× scale. Tinted, additive.
     closeStarHalo.position.set(...closest.star.position);
-    const haloR = radiusLy * 6;
+    const haloR = radiusLy * 1.8;
     closeStarHalo.scale.set(haloR, haloR, 1);
     (closeStarHalo.material as THREE.SpriteMaterial).color.setHex(tint);
     closeStarHalo.visible = closeStarMesh.visible;
