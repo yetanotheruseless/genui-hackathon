@@ -82,6 +82,12 @@ type Player = {
   hoveredId: string | null;
   targetId: string | null;
   warpEngaged: boolean;
+  /** Set when the player has docked at an Orbital (within DOCK_RANGE_LY
+   *  of orbital.position and `dock_orbital` was called). Cleared by
+   *  `undock_orbital` or by warping away. While set, the bridge pane
+   *  shows the orbital's description card and the cockpit hides the
+   *  habitat closeup geometry's "warpable" affordance. */
+  dockedOrbitalId: string | null;
   log: LogLine[];           // private bridge log: narrations + chat
   compendium: Compendium;
 };
@@ -93,10 +99,23 @@ type Orbital = {
   builderShipName: string;
   position: [number, number, number];
   parentStarId?: string;
-  ringRadius: number;       // ly (cosmetic)
-  describedAs?: string;
+  ringRadius: number;       // ly (cosmetic ring radius for renderer)
+  /** Builder's notes — anything from a single line to a paragraph,
+   *  visible to anyone docked at the orbital and in the compendium. */
+  description: string;
+  /** Live occupancy. A player joins this list on dock_orbital and
+   *  leaves on undock_orbital / disconnect / warp-away. Used by the
+   *  "OTHER MINDS ABOARD" panel in the bridge pane. */
+  dockedPlayerIds: string[];
   ts: number;
 };
+
+/** Maximum range from the orbital position at which dock_orbital()
+ *  succeeds. 0.5 AU ≈ "ship is parked at the habitat". The cockpit
+ *  parks itself at orbital.position when warp_to_orbital is called, so
+ *  in practice the ship is centimeters away — this margin just gives
+ *  the captain agent or a manually-flying player some slop. */
+const DOCK_RANGE_LY = 0.5 * (1 / 63241.077);
 
 type PublicMessage = { id: string; fromPlayerId: string; fromShipName: string; text: string; ts: number };
 
@@ -127,6 +146,12 @@ setInterval(() => {
   for (const galaxy of galaxies.values()) {
     for (const [pid, player] of galaxy.players) {
       if (now - player.lastSeenAt > IDLE_REAP_MS) {
+        // Pull the reaped player off any orbital they were docked at,
+        // so the dockedPlayerIds list doesn't accumulate ghosts.
+        if (player.dockedOrbitalId) {
+          const orbital = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+          if (orbital) orbital.dockedPlayerIds = orbital.dockedPlayerIds.filter((id) => id !== pid);
+        }
         galaxy.players.delete(pid);
         appendEvent(galaxy, "departure", `${player.shipName} drifted out of contact.`);
         totalReaped++;
@@ -179,6 +204,7 @@ function newPlayer(_seed: number, shipClass: ShipClass, mind: MindPersona, reque
     hoveredId: null,
     targetId: null,
     warpEngaged: false,
+    dockedOrbitalId: null,
     log: [],
     compendium: {
       spectralCounts: {},
@@ -504,6 +530,7 @@ export function createServer(): McpServer {
             hoveredId: player.hoveredId,
             targetId: player.targetId,
             warpEngaged: player.warpEngaged,
+            dockedOrbitalId: player.dockedOrbitalId,
             ship: { name: player.shipName, class: player.shipClass },
             mind: { id: player.mind.id, name: player.mind.name },
             log: player.log,
@@ -638,6 +665,13 @@ export function createServer(): McpServer {
           }),
         }] };
       }
+      // Engaging warp implicitly undocks — you're leaving.
+      if (player.dockedOrbitalId) {
+        const galaxy = getGalaxy(args.gameId);
+        const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+        if (prev) prev.dockedPlayerIds = prev.dockedPlayerIds.filter((id) => id !== player.playerId);
+        player.dockedOrbitalId = null;
+      }
       player.targetId = args.objectId;
       player.warpEngaged = true;
       return { content: [{ type: "text", text: JSON.stringify({ kind: "warp_engaged", targetId: args.objectId, name: star.name, distanceLy: Number(dist.toFixed(3)) }) }] };
@@ -719,13 +753,14 @@ export function createServer(): McpServer {
     {
       title: "Build a Culture Orbital",
       description:
-        "Construct an Orbital at the player's current position (or near a named star). Visible to all players in the same galaxy.",
+        "Construct an Orbital at the player's current position (or near a named star). Visible to all players in the same galaxy. Pass a description to give other Minds something to read once they dock.",
       inputSchema: {
         gameId: z.string(),
         playerId: z.string(),
         name: z.string().min(1).max(80).describe("Name of the Orbital, e.g. 'Phage', 'Vavatch'."),
         parent_star_id: z.string().optional().describe("Star id; if given, the Orbital is anchored near that star instead of the player's current position."),
         ring_radius_ly: z.number().positive().max(1).default(0.001).describe("Cosmetic ring radius in light-years (default 0.001 ≈ 95 AU)."),
+        description: z.string().max(2000).default("").describe("Builder's notes — purpose, history, signature flourishes. Visible to anyone docked at the orbital."),
       },
       _meta: uiMeta(URI.compendium),
     },
@@ -745,6 +780,8 @@ export function createServer(): McpServer {
         position,
         parentStarId: args.parent_star_id,
         ringRadius: args.ring_radius_ly,
+        description: args.description ?? "",
+        dockedPlayerIds: [],
         ts: Date.now(),
       };
       galaxy.orbitals.push(orbital);
@@ -756,6 +793,160 @@ export function createServer(): McpServer {
         text: `Orbital "${args.name}" laid in${args.parent_star_id ? ` near ${STAR_INDEX[args.parent_star_id]?.name ?? args.parent_star_id}` : " here"}.`,
       });
       return { content: [{ type: "text", text: JSON.stringify({ kind: "orbital_built", orbital }) }] };
+    },
+  );
+
+  // ---------------------------------------------------------------------
+  // Docking — warp_to_orbital → dock_orbital → undock_orbital.
+  //
+  // Player.dockedOrbitalId is server-owned (single setter is dock_orbital,
+  // single clearer is undock_orbital + warp_to / warp_to_orbital). Bridge
+  // pane reads it via get_state to render the docked banner + description
+  // card; cockpit reads it to suppress the "warp here" affordance for an
+  // orbital you're already at.
+
+  registerAppTool(
+    server,
+    "warp_to_orbital",
+    {
+      title: "Engage warp to an Orbital",
+      description:
+        "Set the player's targetId to an Orbital's position. The cockpit auto-steers there at warp; on arrival call dock_orbital to actually go aboard.",
+      inputSchema: {
+        gameId: z.string(),
+        playerId: z.string(),
+        orbitalId: z.string(),
+      },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const galaxy = getGalaxy(args.gameId);
+      const player = getPlayer(galaxy, args.playerId);
+      const orbital = galaxy.orbitals.find((o) => o.id === args.orbitalId);
+      if (!orbital) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: `unknown orbitalId: ${args.orbitalId}` }) }] };
+      }
+      // Warping somewhere is implicit undock — you're leaving.
+      if (player.dockedOrbitalId) {
+        const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+        if (prev) prev.dockedPlayerIds = prev.dockedPlayerIds.filter((id) => id !== player.playerId);
+        player.dockedOrbitalId = null;
+      }
+      // Same "already_at" optimization as warp_to.
+      const dx = orbital.position[0] - player.position[0];
+      const dy = orbital.position[1] - player.position[1];
+      const dz = orbital.position[2] - player.position[2];
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist <= DOCK_RANGE_LY) {
+        return { content: [{
+          type: "text",
+          text: JSON.stringify({
+            kind: "already_at",
+            orbitalId: args.orbitalId,
+            name: orbital.name,
+            distanceLy: Number(dist.toFixed(6)),
+          }),
+        }] };
+      }
+      // Use a synthetic targetId namespaced with the orbital prefix so
+      // cockpit-side code can tell stars from orbitals when looking up
+      // a target's position.
+      player.targetId = `orbital:${orbital.id}`;
+      player.warpEngaged = true;
+      return { content: [{ type: "text", text: JSON.stringify({ kind: "warp_engaged", targetId: player.targetId, name: orbital.name, distanceLy: Number(dist.toFixed(6)) }) }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "dock_orbital",
+    {
+      title: "Dock at an Orbital",
+      description:
+        "Dock the player at an Orbital. Requires being within docking range (~0.5 AU). Sets player.dockedOrbitalId, adds you to the orbital's docked list, and surfaces the orbital description in the bridge.",
+      inputSchema: {
+        gameId: z.string(),
+        playerId: z.string(),
+        orbitalId: z.string(),
+      },
+      _meta: uiMeta(URI.bridge),
+    },
+    async (args) => {
+      const galaxy = getGalaxy(args.gameId);
+      const player = getPlayer(galaxy, args.playerId);
+      const orbital = galaxy.orbitals.find((o) => o.id === args.orbitalId);
+      if (!orbital) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: `unknown orbitalId: ${args.orbitalId}` }) }] };
+      }
+      const dx = orbital.position[0] - player.position[0];
+      const dy = orbital.position[1] - player.position[1];
+      const dz = orbital.position[2] - player.position[2];
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > DOCK_RANGE_LY) {
+        return { content: [{
+          type: "text",
+          text: JSON.stringify({
+            error: "out_of_range",
+            distanceLy: Number(dist.toFixed(6)),
+            dockRangeLy: DOCK_RANGE_LY,
+            hint: "Call warp_to_orbital first, then dock when you arrive.",
+          }),
+        }] };
+      }
+      // Idempotent — re-dock is a no-op.
+      if (player.dockedOrbitalId === orbital.id) {
+        return { content: [{ type: "text", text: JSON.stringify({ kind: "already_docked", orbital }) }] };
+      }
+      // Leave any prior orbital first.
+      if (player.dockedOrbitalId) {
+        const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+        if (prev) prev.dockedPlayerIds = prev.dockedPlayerIds.filter((id) => id !== player.playerId);
+      }
+      player.dockedOrbitalId = orbital.id;
+      if (!orbital.dockedPlayerIds.includes(player.playerId)) {
+        orbital.dockedPlayerIds.push(player.playerId);
+      }
+      // On arrival the ship hard-stops at the habitat — no point drifting.
+      player.warpEngaged = false;
+      player.throttle = 0;
+      appendEvent(galaxy, "dock", `${player.shipName} docked at Orbital ${orbital.name}.`);
+      appendLog(player, {
+        kind: "system",
+        voice: "[orbital]",
+        text: `Aboard "${orbital.name}". ${orbital.description ? "Builder's notes posted to the bridge." : ""}`,
+      });
+      return { content: [{ type: "text", text: JSON.stringify({ kind: "docked", orbital }) }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "undock_orbital",
+    {
+      title: "Leave the Orbital",
+      description:
+        "Clear the player's docked state. The orbital remains in the galaxy and other players stay aboard.",
+      inputSchema: { gameId: z.string(), playerId: z.string() },
+      _meta: uiMeta(URI.bridge),
+    },
+    async (args) => {
+      const galaxy = getGalaxy(args.gameId);
+      const player = getPlayer(galaxy, args.playerId);
+      if (!player.dockedOrbitalId) {
+        return { content: [{ type: "text", text: JSON.stringify({ kind: "not_docked" }) }] };
+      }
+      const orbital = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+      if (orbital) {
+        orbital.dockedPlayerIds = orbital.dockedPlayerIds.filter((id) => id !== player.playerId);
+        appendEvent(galaxy, "undock", `${player.shipName} departed Orbital ${orbital.name}.`);
+        appendLog(player, {
+          kind: "system",
+          voice: "[orbital]",
+          text: `Cast off from "${orbital.name}".`,
+        });
+      }
+      player.dockedOrbitalId = null;
+      return { content: [{ type: "text", text: JSON.stringify({ kind: "undocked" }) }] };
     },
   );
 

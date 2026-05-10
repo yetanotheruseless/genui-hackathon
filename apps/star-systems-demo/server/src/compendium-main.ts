@@ -20,9 +20,14 @@ const orbitalsList = $("orbitals") as HTMLUListElement;
 const othersList = $("others") as HTMLUListElement;
 const chatList = $("chat") as HTMLUListElement;
 const orbitalNameInput = $("orbital-name") as HTMLInputElement;
+const orbitalDescInput = $("orbital-description") as HTMLTextAreaElement;
 const buildBtn = $("build-btn") as HTMLButtonElement;
 const publicInput = $("public-input") as HTMLInputElement;
 const publicBtn = $("public-btn") as HTMLButtonElement;
+
+// Last-known docked orbital id from get_state polling. Drives the
+// per-row "leave" button + the "docked" highlight class.
+let dockedOrbitalId: string | null = null;
 
 const SPECTRAL_LABELS: Record<string, string> = {
   o_dwarf: "O dwarfs", b_dwarf: "B-type", a_dwarf: "A main-seq",
@@ -61,12 +66,38 @@ buildBtn.addEventListener("click", async () => {
   if (!gameId || !playerId) return;
   const name = orbitalNameInput.value.trim();
   if (!name) { orbitalNameInput.focus(); return; }
+  const description = orbitalDescInput.value.trim();
   buildBtn.disabled = true;
   try {
-    await callTool(pane.app, "build_orbital", { gameId, playerId, name });
+    await callTool(pane.app, "build_orbital", { gameId, playerId, name, description });
     orbitalNameInput.value = "";
+    orbitalDescInput.value = "";
   } finally {
     buildBtn.disabled = false;
+  }
+});
+
+// Delegated click handler for orbital row actions (warp / leave). Each
+// button carries its orbitalId in data-orbital-id and its action in
+// data-action, so we don't have to bind per-row listeners and the
+// list can be rebuilt every poll without losing handlers.
+orbitalsList.addEventListener("click", async (e) => {
+  const t = e.target as HTMLElement;
+  const btn = t.closest("button[data-action]") as HTMLButtonElement | null;
+  if (!btn || !gameId || !playerId) return;
+  const orbitalId = btn.dataset.orbitalId;
+  if (!orbitalId) return;
+  const action = btn.dataset.action;
+  btn.disabled = true;
+  try {
+    if (action === "warp") {
+      await callTool(pane.app, "warp_to_orbital", { gameId, playerId, orbitalId });
+    } else if (action === "leave") {
+      await callTool(pane.app, "undock_orbital", { gameId, playerId });
+    }
+  } finally {
+    // Re-enable on next render (poll runs at 700ms, so this is short).
+    setTimeout(() => { btn.disabled = false; }, 600);
   }
 });
 
@@ -88,6 +119,7 @@ poll(700, async () => {
   const s = await callTool<any>(pane.app, "get_state", { gameId, playerId });
   if (!s?.compendium) return;
 
+  dockedOrbitalId = s.dockedOrbitalId ?? null;
   renderCounts(spectralList, s.compendium.spectralCounts || {}, SPECTRAL_ORDER, SPECTRAL_LABELS);
   renderCounts(planetList, s.compendium.planetCounts || {}, PLANET_ORDER, PLANET_LABELS);
   renderDiscovered(s.compendium.discoveredObjectNames || []);
@@ -127,7 +159,25 @@ function renderOrbitals(orbitals: any[]) {
   if (!orbitals.length) { orbitalsList.innerHTML = '<li class="empty-tag">— none built yet —</li>'; return; }
   for (const o of orbitals) {
     const li = document.createElement("li");
-    li.innerHTML = `${escapeHtml(o.name)}<span class="builder">— ${escapeHtml(o.builderShipName)}</span>`;
+    const isDocked = dockedOrbitalId === o.id;
+    if (isDocked) li.classList.add("docked");
+    const occupants = (o.dockedPlayerIds?.length ?? 0);
+    const occBadge = occupants ? `<span class="occupants">${occupants} aboard</span>` : "";
+    const dockedTag = isDocked ? '<span class="occupants">▶ aboard</span>' : "";
+    const desc = (o.description ?? "").trim();
+    const descHtml = desc ? `<div class="desc">${escapeHtml(desc)}</div>` : "";
+    const actions = isDocked
+      ? `<button class="leave" data-action="leave" data-orbital-id="${escapeHtml(o.id)}">leave</button>`
+      : `<button data-action="warp" data-orbital-id="${escapeHtml(o.id)}">warp</button>`;
+    li.innerHTML = `
+      <div class="row1">
+        <span class="name">${escapeHtml(o.name)}</span>
+        <span class="builder">— ${escapeHtml(o.builderShipName)}</span>
+        ${dockedTag || occBadge}
+      </div>
+      ${descHtml}
+      <div class="actions">${actions}</div>
+    `;
     orbitalsList.appendChild(li);
   }
 }
