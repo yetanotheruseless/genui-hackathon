@@ -1206,26 +1206,50 @@ function tick() {
   // Autobrake / observe-on-entry / planet visibility / systemLight stay
   // gated on the tighter BRAKE_RANGE_LY (≈ 100 AU) — those are gameplay
   // states, not visual ones (closeStarMesh is on its own wider range).
+  //
+  // Departure pass-through: if we're outside the inner ~10 AU AND clearly
+  // heading away from the star (negative radial velocity, i.e. fwd dotted
+  // with the unit vector toward the star is negative), don't brake. This
+  // lets you ramp back to full warp the moment you've cleared the
+  // planetary system, instead of crawling out to 100 AU at 0.1 c.
+  // Inside the inner core we always brake regardless of direction —
+  // planets live there and a misaimed yaw could drop you onto Earth.
+  const INNER_AU = 10;
+  const DEPARTING_DOT_THRESHOLD = -0.2;   // ~cos(101°): clearly off-axis from star
   if (closest && closest.dist < BRAKE_RANGE_LY) {
     const distAu = closest.dist / LY_PER_AU;
-    // Autobrake — clamp throttle to a sub-warp value, and disengage
-    // autopilot if it was steering us here. SNAP rather than smooth: the
-    // cubic speed law (s = throttle³·0.4) means a smoothed ramp from 1.0
-    // to 0.025 takes ~10 frames, during which we'd cover 2000+ AU and
-    // fly clean through the system. A hard clamp is the only way to keep
-    // the ship inside the cordon.
-    const cap = maxImpulseThrottle(distAu);
-    if (ship.throttle > cap) {
-      const prev = ship.throttle;
-      ship.throttle = cap;
-      throttleEl.value = ship.throttle.toString();
-      dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
-    }
-    if (ship.warpEngaged) {
-      ship.warpEngaged = false;
-      dbg(`[brake] disengaged warp at ${closest.star.name} (${distAu.toFixed(1)}AU)`);
+    const toStar = new THREE.Vector3(
+      closest.star.position[0] - ship.position.x,
+      closest.star.position[1] - ship.position.y,
+      closest.star.position[2] - ship.position.z,
+    );
+    const toStarLen = toStar.length() || 1;
+    const radialDot = (toStar.x * fwd.x + toStar.y * fwd.y + toStar.z * fwd.z) / toStarLen;
+    const departing = radialDot < DEPARTING_DOT_THRESHOLD;
+    const insideInner = distAu < INNER_AU;
+    const shouldBrake = insideInner || !departing;
+    if (shouldBrake) {
+      // Autobrake — clamp throttle to a sub-warp value, and disengage
+      // autopilot if it was steering us here. SNAP rather than smooth:
+      // the cubic speed law (s = throttle³·0.4) means a smoothed ramp
+      // from 1.0 to 0.025 takes ~10 frames, during which we'd cover 2000+
+      // AU and fly clean through the system. A hard clamp is the only
+      // way to keep the ship inside the cordon.
+      const cap = maxImpulseThrottle(distAu);
+      if (ship.throttle > cap) {
+        const prev = ship.throttle;
+        ship.throttle = cap;
+        throttleEl.value = ship.throttle.toString();
+        dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
+      }
+      if (ship.warpEngaged) {
+        ship.warpEngaged = false;
+        dbg(`[brake] disengaged warp at ${closest.star.name} (${distAu.toFixed(1)}AU)`);
+      }
     }
     // Auto-observe on first entry into a system (LLM Mind narrates).
+    // Fires regardless of whether we braked — flying through a system
+    // still counts as observing it.
     if (!observed.has(closest.star.id) && gameId && playerId) {
       observed.add(closest.star.id);
       void callTool(pane.app, "observe", { gameId, playerId, objectId: closest.star.id });
