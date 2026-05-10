@@ -621,7 +621,8 @@ export function createServer(): McpServer {
               planetCount: s.planets?.length ?? 0,
               radiusSolar: starRadiusSolar(s),
               planets: s.planets?.map((p) => ({
-                name: p.name, kind: p.kind, orbitAU: p.orbitAU, massEarths: p.massEarths,
+                name: p.name, kind: p.kind, orbitAU: p.orbitAU,
+                massEarths: p.massEarths, radiusEarths: p.radiusEarths,
               })) ?? [],
             })),
             // Bright catalog for the starfield backdrop. Compact (no

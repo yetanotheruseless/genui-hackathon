@@ -19,6 +19,7 @@ type PlanetLite = {
   kind: string;            // PlanetKind: terrestrial / super_earth / neptune_like / ice_giant / gas_giant / hot_jupiter / super_jupiter
   orbitAU?: number;
   massEarths?: number;
+  radiusEarths?: number;   // measured/estimated R⊕; cockpit prefers this over the kind-based default
 };
 type StarLite = {
   id: string; name: string; position: [number, number, number];
@@ -481,7 +482,12 @@ function buildStarMeshes() {
     // single roving systemLight gives a proper day/night terminator
     // when you're parked next to the parent star.
     for (const p of s.planets ?? []) {
-      const r = (PLANET_RADIUS_R_EARTH[p.kind] ?? 1) * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
+      // Prefer measured radius (R⊕) when the catalog has it (Sol's
+      // planets, TRAPPIST-1, etc.); fall back to a kind-based default.
+      // PLANET_VISUAL_SCALE inflation is applied either way so the
+      // bodies are visible at AU distances.
+      const radiusR = p.radiusEarths ?? PLANET_RADIUS_R_EARTH[p.kind] ?? 1;
+      const r = radiusR * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
       const mat = new THREE.MeshLambertMaterial({
         color: PLANET_COLOR[p.kind] ?? 0xaaaaaa,
         fog: false,

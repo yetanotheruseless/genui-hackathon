@@ -31,6 +31,7 @@ export type Planet = {
   name: string;
   kind: PlanetKind;
   massEarths?: number;       // M⊕
+  radiusEarths?: number;     // R⊕ — when measured (transits) or estimated
   orbitAU?: number;
   notes?: string;            // tidal lock? habitable zone? etc.
 };
@@ -104,14 +105,14 @@ export const STARS: Star[] = [
     radiusSolar: 1.0,
     description: "Our home star. A G2V main-sequence yellow dwarf, ~4.6 Gyr old.",
     planets: [
-      { name: "Mercury", kind: "terrestrial", massEarths: 0.055, orbitAU: 0.39 },
-      { name: "Venus", kind: "terrestrial", massEarths: 0.815, orbitAU: 0.72 },
-      { name: "Earth", kind: "terrestrial", massEarths: 1.0, orbitAU: 1.0, notes: "habitable" },
-      { name: "Mars", kind: "terrestrial", massEarths: 0.107, orbitAU: 1.52 },
-      { name: "Jupiter", kind: "gas_giant", massEarths: 317.8, orbitAU: 5.2 },
-      { name: "Saturn", kind: "gas_giant", massEarths: 95.2, orbitAU: 9.6 },
-      { name: "Uranus", kind: "ice_giant", massEarths: 14.5, orbitAU: 19.2 },
-      { name: "Neptune", kind: "ice_giant", massEarths: 17.1, orbitAU: 30.1 },
+      { name: "Mercury", kind: "terrestrial", massEarths: 0.055, radiusEarths: 0.383, orbitAU: 0.39 },
+      { name: "Venus",   kind: "terrestrial", massEarths: 0.815, radiusEarths: 0.949, orbitAU: 0.72 },
+      { name: "Earth",   kind: "terrestrial", massEarths: 1.0,   radiusEarths: 1.0,   orbitAU: 1.0, notes: "habitable" },
+      { name: "Mars",    kind: "terrestrial", massEarths: 0.107, radiusEarths: 0.532, orbitAU: 1.52 },
+      { name: "Jupiter", kind: "gas_giant",   massEarths: 317.8, radiusEarths: 11.21, orbitAU: 5.2 },
+      { name: "Saturn",  kind: "gas_giant",   massEarths: 95.2,  radiusEarths: 9.45,  orbitAU: 9.6 },
+      { name: "Uranus",  kind: "ice_giant",   massEarths: 14.5,  radiusEarths: 4.01,  orbitAU: 19.2 },
+      { name: "Neptune", kind: "ice_giant",   massEarths: 17.1,  radiusEarths: 3.88,  orbitAU: 30.1 },
     ],
   },
   {
@@ -126,9 +127,9 @@ export const STARS: Star[] = [
     radiusSolar: 0.15,
     description: "Closest star to Sol. A red dwarf flare star with at least three confirmed planets including Proxima b in the habitable zone.",
     planets: [
-      { name: "Proxima b", kind: "terrestrial", massEarths: 1.07, orbitAU: 0.0485, notes: "in habitable zone, likely tidally locked" },
+      { name: "Proxima b", kind: "terrestrial", massEarths: 1.07, radiusEarths: 1.07, orbitAU: 0.0485, notes: "in habitable zone, likely tidally locked" },
       { name: "Proxima c", kind: "super_earth", massEarths: 7.0, orbitAU: 1.5 },
-      { name: "Proxima d", kind: "terrestrial", massEarths: 0.26, orbitAU: 0.029 },
+      { name: "Proxima d", kind: "terrestrial", massEarths: 0.26, radiusEarths: 0.81, orbitAU: 0.029 },
     ],
   },
   {
@@ -191,8 +192,8 @@ export const STARS: Star[] = [
     radiusSolar: 0.39,
     description: "A nearby M dwarf with at least two confirmed planets.",
     planets: [
-      { name: "Lalande 21185 b", kind: "super_earth", massEarths: 2.69, orbitAU: 0.079 },
-      { name: "Lalande 21185 c", kind: "neptune_like", massEarths: 13.6, orbitAU: 2.94 },
+      { name: "Lalande 21185 b", kind: "super_earth",  massEarths: 2.69,  radiusEarths: 1.42, orbitAU: 0.079 },
+      { name: "Lalande 21185 c", kind: "neptune_like", massEarths: 13.6,  radiusEarths: 3.40, orbitAU: 2.94 },
     ],
   },
   {
@@ -242,7 +243,7 @@ export const STARS: Star[] = [
     radiusSolar: 0.74,
     description: "Young (~800 Myr) orange dwarf. Has a debris disk and at least one confirmed Jupiter-mass planet.",
     planets: [
-      { name: "Epsilon Eridani b", kind: "gas_giant", massEarths: 247, orbitAU: 3.48, notes: "Jupiter-mass; eccentric orbit" },
+      { name: "Epsilon Eridani b", kind: "gas_giant", massEarths: 247, radiusEarths: 11.5, orbitAU: 3.48, notes: "Jupiter-mass; eccentric orbit" },
     ],
   },
   {
@@ -256,7 +257,7 @@ export const STARS: Star[] = [
     radiusSolar: 0.2,
     description: "Quiet red dwarf with a confirmed temperate exoplanet. Drifting toward Sol; will be the closest star in ~71,000 years.",
     planets: [
-      { name: "Ross 128 b", kind: "terrestrial", massEarths: 1.4, orbitAU: 0.0496, notes: "likely habitable; receives 1.38× Earth flux" },
+      { name: "Ross 128 b", kind: "terrestrial", massEarths: 1.4, radiusEarths: 1.10, orbitAU: 0.0496, notes: "likely habitable; receives 1.38× Earth flux" },
     ],
   },
   {
@@ -321,13 +322,13 @@ export const STARS: Star[] = [
     radiusSolar: 0.12,
     description: "An ultracool red dwarf hosting seven Earth-sized planets — three of them in the habitable zone. The most extensively characterized system after our own.",
     planets: [
-      { name: "TRAPPIST-1 b", kind: "terrestrial", massEarths: 1.374, orbitAU: 0.0115 },
-      { name: "TRAPPIST-1 c", kind: "terrestrial", massEarths: 1.308, orbitAU: 0.0158 },
-      { name: "TRAPPIST-1 d", kind: "terrestrial", massEarths: 0.388, orbitAU: 0.0223 },
-      { name: "TRAPPIST-1 e", kind: "terrestrial", massEarths: 0.692, orbitAU: 0.0293, notes: "habitable zone" },
-      { name: "TRAPPIST-1 f", kind: "terrestrial", massEarths: 1.039, orbitAU: 0.0385, notes: "habitable zone" },
-      { name: "TRAPPIST-1 g", kind: "terrestrial", massEarths: 1.321, orbitAU: 0.0468, notes: "habitable zone" },
-      { name: "TRAPPIST-1 h", kind: "terrestrial", massEarths: 0.326, orbitAU: 0.0619 },
+      { name: "TRAPPIST-1 b", kind: "terrestrial", massEarths: 1.374, radiusEarths: 1.116, orbitAU: 0.0115 },
+      { name: "TRAPPIST-1 c", kind: "terrestrial", massEarths: 1.308, radiusEarths: 1.097, orbitAU: 0.0158 },
+      { name: "TRAPPIST-1 d", kind: "terrestrial", massEarths: 0.388, radiusEarths: 0.788, orbitAU: 0.0223 },
+      { name: "TRAPPIST-1 e", kind: "terrestrial", massEarths: 0.692, radiusEarths: 0.920, orbitAU: 0.0293, notes: "habitable zone" },
+      { name: "TRAPPIST-1 f", kind: "terrestrial", massEarths: 1.039, radiusEarths: 1.045, orbitAU: 0.0385, notes: "habitable zone" },
+      { name: "TRAPPIST-1 g", kind: "terrestrial", massEarths: 1.321, radiusEarths: 1.129, orbitAU: 0.0468, notes: "habitable zone" },
+      { name: "TRAPPIST-1 h", kind: "terrestrial", massEarths: 0.326, radiusEarths: 0.755, orbitAU: 0.0619 },
     ],
   },
   {
