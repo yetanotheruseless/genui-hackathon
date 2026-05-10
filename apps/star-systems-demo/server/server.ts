@@ -214,6 +214,34 @@ type Galaxy = {
 };
 
 const galaxies = new Map<string, Galaxy>();
+
+/** Exposed to main.ts for the (opt-in) SQLite snapshot loop. Same Map
+ *  the server mutates — no copy, no sync. */
+export function getGalaxies(): Map<string, Galaxy> {
+  return galaxies;
+}
+
+/** Reconstitute a galaxy snapshot from disk. Called once at startup,
+ *  before any tool can run. */
+export function hydrateGalaxy(snap: {
+  gameId: string;
+  seed: number;
+  players: Record<string, Player>;
+  orbitals: Orbital[];
+  publicChat: PublicMessage[];
+  events: { id: string; kind: string; text: string; ts: number }[];
+}): void {
+  if (galaxies.has(snap.gameId)) return;
+  galaxies.set(snap.gameId, {
+    gameId: snap.gameId,
+    seed: snap.seed,
+    players: new Map(Object.entries(snap.players ?? {})),
+    orbitals: snap.orbitals ?? [],
+    publicChat: snap.publicChat ?? [],
+    events: snap.events ?? [],
+  });
+}
+
 const LOG_CAP = 80;
 const PUBLIC_CAP = 40;
 
