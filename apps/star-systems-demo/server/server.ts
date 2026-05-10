@@ -1059,8 +1059,9 @@ export function createServer(): McpServer {
             name: z.string().min(1).max(80),
             parent_star_id: z.string().optional(),
             ring_radius_ly: z.number().positive().max(1).optional(),
+            description: z.string().max(2000).optional().describe("Builder's notes — visible to anyone who docks."),
           }),
-          execute: async ({ name, parent_star_id, ring_radius_ly }) => {
+          execute: async ({ name, parent_star_id, ring_radius_ly, description }) => {
             let position: [number, number, number] = [...player.position];
             if (parent_star_id) {
               const s = resolveStar(parent_star_id);
@@ -1069,6 +1070,8 @@ export function createServer(): McpServer {
             const orbital: Orbital = {
               id: randomUUID(),
               name,
+              description: description ?? "",
+              dockedPlayerIds: [],
               builderPlayerId: player.playerId,
               builderShipName: player.shipName,
               position,
@@ -1096,6 +1099,65 @@ export function createServer(): McpServer {
               text: message,
             });
             return { kind: "broadcast" };
+          },
+        }),
+
+        // Orbital docking: warp_to_orbital → dock_orbital → undock_orbital.
+        warp_to_orbital: tool({
+          description: "Set the ship's target to an Orbital and engage warp. On arrival, call dock_orbital to actually go aboard.",
+          parameters: z.object({ orbital_id: z.string() }),
+          execute: async ({ orbital_id }) => {
+            const orbital = galaxy.orbitals.find((o) => o.id === orbital_id);
+            if (!orbital) return { error: `unknown orbital_id: ${orbital_id}` };
+            if (player.dockedOrbitalId) {
+              const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+              if (prev) prev.dockedPlayerIds = prev.dockedPlayerIds.filter((id) => id !== player.playerId);
+              player.dockedOrbitalId = null;
+            }
+            const dx = orbital.position[0] - player.position[0];
+            const dy = orbital.position[1] - player.position[1];
+            const dz = orbital.position[2] - player.position[2];
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist <= DOCK_RANGE_LY) return { kind: "already_at", orbital_id, name: orbital.name, distanceLy: +dist.toFixed(6) };
+            player.targetId = `orbital:${orbital.id}`;
+            player.warpEngaged = true;
+            return { kind: "warp_engaged", orbital_id, name: orbital.name, distanceLy: +dist.toFixed(6) };
+          },
+        }),
+        dock_orbital: tool({
+          description: "Dock at an Orbital. Requires being within docking range (~0.5 AU) — call warp_to_orbital first if you're far away.",
+          parameters: z.object({ orbital_id: z.string() }),
+          execute: async ({ orbital_id }) => {
+            const orbital = galaxy.orbitals.find((o) => o.id === orbital_id);
+            if (!orbital) return { error: `unknown orbital_id: ${orbital_id}` };
+            const dx = orbital.position[0] - player.position[0];
+            const dy = orbital.position[1] - player.position[1];
+            const dz = orbital.position[2] - player.position[2];
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist > DOCK_RANGE_LY) return { error: "out_of_range", distanceLy: +dist.toFixed(6), hint: "warp_to_orbital first" };
+            if (player.dockedOrbitalId === orbital.id) return { kind: "already_docked", name: orbital.name };
+            if (player.dockedOrbitalId) {
+              const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+              if (prev) prev.dockedPlayerIds = prev.dockedPlayerIds.filter((id) => id !== player.playerId);
+            }
+            player.dockedOrbitalId = orbital.id;
+            if (!orbital.dockedPlayerIds.includes(player.playerId)) orbital.dockedPlayerIds.push(player.playerId);
+            player.warpEngaged = false;
+            player.throttle = 0;
+            appendEvent(galaxy, "dock", `${player.shipName} docked at Orbital ${orbital.name}.`);
+            return { kind: "docked", name: orbital.name, description: orbital.description };
+          },
+        }),
+        undock_orbital: tool({
+          description: "Leave the Orbital you're currently docked at.",
+          parameters: z.object({}),
+          execute: async () => {
+            const id = player.dockedOrbitalId;
+            if (!id) return { kind: "not_docked" };
+            const orbital = galaxy.orbitals.find((o) => o.id === id);
+            if (orbital) orbital.dockedPlayerIds = orbital.dockedPlayerIds.filter((pid) => pid !== player.playerId);
+            player.dockedOrbitalId = null;
+            return { kind: "undocked", name: orbital?.name };
           },
         }),
       };

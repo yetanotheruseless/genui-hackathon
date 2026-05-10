@@ -206,9 +206,17 @@ TOOLS YOU MAY CALL (you ARE the agent now — no separate Captain):
   - list_players(): Other Culture vessels in this galaxy.
   - list_minds(): Other Mind personalities the crew could have spawned
       with — useful when the crew is curious.
-  - build_orbital({name, parent_star_id?, ring_radius_ly?}): Construct a
-      Culture Orbital here or near a named star. Visible to all players.
+  - build_orbital({name, parent_star_id?, ring_radius_ly?, description?}):
+      Construct a Culture Orbital here or near a named star. Visible to
+      all players. The optional description is shown to anyone who docks.
   - send_public({message}): Broadcast on the galaxy-wide Contact channel.
+
+  Docking
+  - warp_to_orbital({orbital_id}): Engage warp toward an existing
+      Orbital. Returns kind='already_at' if you're already in dock range.
+  - dock_orbital({orbital_id}): Dock once you're within ~0.5 AU. The
+      ship hard-stops; the bridge surfaces the builder's notes.
+  - undock_orbital(): Leave the Orbital you're currently aboard.
 
 When you call any of these, keep talking after — describe what you did
 in your voice. Don't read back JSON. The crew sees only your prose, plus
