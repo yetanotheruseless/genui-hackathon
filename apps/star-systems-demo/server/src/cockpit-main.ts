@@ -121,8 +121,14 @@ function dbg(msg: string, kind: "info" | "warn" = "info") {
 }
 
 // Press ` (backtick) to toggle the on-screen debug overlay.
+// Press L to toggle the debug fill light (full ambient = "see everything").
 window.addEventListener("keydown", (e) => {
   if (e.key === "`") debugLogEl?.classList.toggle("hidden");
+  if (e.key === "l" || e.key === "L") {
+    debugLightOn = !debugLightOn;
+    debugFillLight.intensity = debugLightOn ? 1.5 : 0;
+    dbg(`debug fill light ${debugLightOn ? "ON" : "OFF"}`);
+  }
 });
 
 const pane = setupPaneApp("Culture Cockpit");
@@ -233,6 +239,15 @@ systemLight.visible = false;
 scene.add(systemLight);
 // Faint ambient so the night side of planets isn't a void.
 scene.add(new THREE.AmbientLight(0xffffff, 0.06));
+
+// Debug fill light, off by default. Press L to toggle. When on, every
+// Lambert surface (planets, orbital outer ring) is fully lit so you can
+// see the night side of bodies and verify positions / colors during
+// development. Doesn't affect MeshBasicMaterial bodies (stars, sprites,
+// closeStarMesh) since those ignore lighting entirely.
+const debugFillLight = new THREE.AmbientLight(0xffffff, 0);
+scene.add(debugFillLight);
+let debugLightOn = false;
 
 // ---- Procedural sprite textures (no asset files shipped) ---------------
 function makeRadialTexture(stops: [number, number][], size = 128): THREE.Texture {
