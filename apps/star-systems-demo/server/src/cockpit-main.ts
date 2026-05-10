@@ -784,6 +784,17 @@ function maxImpulseThrottle(distAu: number): number {
   return speedCapThrottleByLy(distAu * LY_PER_AU);
 }
 
+/** Looser cap used when the player is clearly DEPARTING a star but
+ *  still inside the INNER_AU cordon — symmetric arrival caps are too
+ *  conservative outbound, where there's no risk of a misaimed yaw
+ *  putting you on a planet. The ladder is shifted up one band so that
+ *  a 1 → 10 AU outbound trip takes ~3s instead of ~9s. */
+function departingImpulseThrottle(distAu: number): number {
+  if (distAu > 5)  return 0.0168;   // 6 AU/s   (vs 2 on approach)
+  if (distAu > 1)  return 0.0117;   // 2 AU/s   (vs 0.6 on approach)
+  return 0.00782;                   // 0.6 AU/s (vs 0.4 near photosphere)
+}
+
 /** Autopilot's target throttle from distance-to-target. At cruise
  *  range (> 1 ly) we want full warp; closer in we share the brake's
  *  deceleration ladder so the smoothing converges to the right cap
@@ -1238,12 +1249,18 @@ function tick() {
     const insideInner = distAu < INNER_AU;
     const shouldBrake = insideInner || !departing;
     if (shouldBrake) {
-      const cap = maxImpulseThrottle(distAu);
+      // Inside-INNER and departing: looser cap so the player can
+      // accelerate outward without the slow arrival ladder dominating.
+      // Otherwise (approaching, or sideways, or yet farther in): the
+      // symmetric arrival cap.
+      const cap = (insideInner && departing)
+        ? departingImpulseThrottle(distAu)
+        : maxImpulseThrottle(distAu);
       if (ship.throttle > cap) {
         const prev = ship.throttle;
         ship.throttle = cap;
         throttleEl.value = ship.throttle.toString();
-        dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
+        dbg(`[brake${insideInner && departing ? "↑" : ""}] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
       }
       // Snap-to-entry: if we crossed the brake boundary mid-segment
       // (CPA happens at t > 0 from current position), warp the ship
