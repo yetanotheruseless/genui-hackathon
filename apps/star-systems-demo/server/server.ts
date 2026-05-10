@@ -38,7 +38,7 @@ const DEBUG_LOG_PATH = process.env.DEBUG_LOG_PATH ?? "/tmp/cockpit-debug.log";
 // Truncate at startup so each subprocess (each new chat session) starts fresh.
 void writeFile(DEBUG_LOG_PATH, `--- session start ${new Date().toISOString()} pid=${process.pid} ---\n`).catch(() => {});
 
-import { STARS, STAR_INDEX, spectralBucket, starRadiusSolar, type Planet, type PlanetKind, type SpectralClass, type Star } from "./astrodata.js";
+import { STARS, STAR_INDEX, spectralBucket, starAbsMag, starRadiusSolar, type Planet, type PlanetKind, type SpectralClass, type Star } from "./astrodata.js";
 import {
   MINDS,
   SHIP_CLASS_INFO,
@@ -642,6 +642,7 @@ export function createServer(): McpServer {
               hasPlanets: !!(s.planets && s.planets.length),
               planetCount: s.planets?.length ?? 0,
               radiusSolar: starRadiusSolar(s),
+              absMag: starAbsMag(s),
               planets: s.planets?.map((p) => ({
                 name: p.name, kind: p.kind, orbitAU: p.orbitAU, massEarths: p.massEarths,
               })) ?? [],
