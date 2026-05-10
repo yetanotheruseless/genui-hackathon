@@ -1266,12 +1266,16 @@ function tick() {
   }
 
   // Per-frame orbital LOD update — distant icon size + closeup habitat
-  // visibility. Icon uses the same min-pixel floor as stars so it never
-  // becomes a sub-pixel ghost; the closeup ring geometry only swaps in
-  // within ORBITAL_CLOSEUP_RANGE_LY of the camera, hidden otherwise so
-  // we don't pay for it on the 99% of frames you're not approaching.
+  // visibility. Icon uses the same min-pixel floor + max-pixel cap as
+  // star cores so it stays a readable point at any distance and never
+  // balloons to a screen-spanning blob when you're parked AT the
+  // orbital. The closeup ring geometry only swaps in within
+  // ORBITAL_CLOSEUP_RANGE_LY of the camera, AND only when the camera
+  // is OUTSIDE the ring — looking at a torus from inside its center
+  // wraps the additive inner strip around the viewport and washes out.
   const ORBITAL_ICON_BASE = 0.0006;            // world units (ly)
   const ORBITAL_ICON_MIN_PX = 6;
+  const ORBITAL_ICON_MAX_PX = 40;
   const spinRate = 0.4;                         // rad/sec on inner ring
   for (const layers of orbitalLayers.values()) {
     const o = layers.data;
@@ -1279,7 +1283,8 @@ function tick() {
     const dy = o.position[1] - ship.position.y;
     const dz = o.position[2] - ship.position.z;
     const d = Math.hypot(dx, dy, dz);
-    const showHabitat = d < ORBITAL_CLOSEUP_RANGE_LY;
+    const insideRing = d < o.ringRadius * 0.95;
+    const showHabitat = d < ORBITAL_CLOSEUP_RANGE_LY && !insideRing;
     layers.habitat.visible = showHabitat;
     if (showHabitat) {
       // Scale the habitat group to the orbital's stored ringRadius (ly),
@@ -1292,11 +1297,18 @@ function tick() {
       const fadeIn = Math.min(1, (ORBITAL_CLOSEUP_RANGE_LY - d) / (ORBITAL_CLOSEUP_RANGE_LY * 0.5));
       (layers.icon.material as THREE.SpriteMaterial).opacity = 0.9 * (1 - fadeIn);
     } else {
+      // Icon stays on. When the camera is inside the ring the habitat
+      // is hidden, so the icon is the only "you are here" marker —
+      // keep it visible at full opacity.
       (layers.icon.material as THREE.SpriteMaterial).opacity = 0.9;
     }
-    // Icon scale: max(physical, min-pixel-floor at distance).
+    // Icon scale: max(physical, min-pixel-floor) but capped to a hard
+    // pixel ceiling. Without the cap, ORBITAL_ICON_BASE = 0.0006 ly at
+    // 0.00001 ly distance is 60× viewport — bloom turns the frame to
+    // flat white. Same pattern as the star CORE_MAX_PX.
     const minR = (ORBITAL_ICON_MIN_PX * d * 1.4) / canvasH;
-    const r = Math.max(ORBITAL_ICON_BASE, minR);
+    const maxR = (ORBITAL_ICON_MAX_PX * d * 1.4) / canvasH;
+    const r = Math.min(maxR, Math.max(ORBITAL_ICON_BASE, minR));
     layers.icon.scale.set(r, r, 1);
   }
 

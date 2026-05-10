@@ -1013,7 +1013,7 @@ export function createServer(): McpServer {
         playerId: z.string(),
         name: z.string().min(1).max(80).describe("Name of the Orbital, e.g. 'Phage', 'Vavatch'."),
         parent_star_id: z.string().optional().describe("Star id; if given, the Orbital is anchored near that star instead of the player's current position."),
-        ring_radius_ly: z.number().positive().max(1).default(0.001).describe("Cosmetic ring radius in light-years (default 0.001 ≈ 95 AU)."),
+        ring_radius_ly: z.number().positive().max(1).default(0.00005).describe("Cosmetic ring radius in light-years (default 5e-5 ≈ 3 AU — readable inner-system scale)."),
         description: z.string().max(2000).default("").describe("Builder's notes — purpose, history, signature flourishes. Visible to anyone docked at the orbital."),
       },
       _meta: uiMeta(URI.compendium),
@@ -1021,11 +1021,37 @@ export function createServer(): McpServer {
     async (args) => {
       const galaxy = getGalaxy(args.gameId);
       const player = getPlayer(galaxy, args.playerId);
+      // Place the orbital with a small offset from the build origin so
+      // the player ends up OUTSIDE the new ring — otherwise the camera
+      // is at the ring's center and the user sees nothing distinct.
+      // Offset is 4× the ring radius (≈12 AU at default), perpendicular
+      // to the player's heading so the orbital is "next to" them.
       let position: [number, number, number] = [...player.position];
       if (args.parent_star_id) {
         const s = STAR_INDEX[args.parent_star_id];
         if (s) position = [...s.position];
       }
+      const offsetMag = args.ring_radius_ly * 4;
+      // Pick an offset direction: prefer "up" relative to the player's
+      // heading (cross with +Y world up); fall back to world +Y if the
+      // ship is pointed straight up. Guarantees the orbital is laid in
+      // the plane of view, not directly behind/ahead.
+      const h = player.heading;
+      let ox: number, oy: number, oz: number;
+      const upY = Math.abs(h[1]);
+      if (upY < 0.95) {
+        // Cross h × world-up gives a vector perpendicular to heading.
+        ox = h[2]; oy = 0; oz = -h[0];
+        const len = Math.hypot(ox, oy, oz) || 1;
+        ox /= len; oz /= len;
+      } else {
+        ox = 1; oy = 0; oz = 0;
+      }
+      position = [
+        position[0] + ox * offsetMag,
+        position[1] + oy * offsetMag,
+        position[2] + oz * offsetMag,
+      ];
       const orbital: Orbital = {
         id: randomUUID(),
         name: args.name,
