@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Starship · Target</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #04060a;
+        --line: #202a3d;
+        --ink: #cfd6e6;
+        --dim: #6f7689;
+        --accent: #7ad7ff;
+        --star: #ffd28a;
+        --planet: #6ba2e0;
+        --orbital: #9c6cff;
+        --warn: #ffb86b;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%;
+        background: var(--bg); color: var(--ink);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+      }
+      body { display: flex; flex-direction: column; }
+
+      header {
+        padding: 5px 8px;
+        border-bottom: 1px solid var(--line);
+        color: var(--dim);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        flex-shrink: 0;
+      }
+
+      #body {
+        flex: 1;
+        padding: 8px 10px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      #content {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+      }
+      /* Pushes everything below it (i.e. the actions row) to the
+         bottom of the pane, regardless of how few rows of pills the
+         current target produces. */
+      .pills + .desc, .pills:not(:has(+ .desc)) { margin-bottom: auto; }
+      .actions { margin-top: auto !important; }
+
+      /* Title row — name on the left, status badge pinned to the right
+         (so it sits inline with the target name instead of mixing into
+         the data pills below). */
+      .title-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .name {
+        color: var(--accent);
+        font-weight: 700;
+        font-size: 15px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        line-height: 1.2;
+      }
+      .name.kind-star { color: var(--star); }
+      .name.kind-planet { color: var(--planet); }
+      .name.kind-orbital { color: var(--orbital); }
+      .status-badge {
+        color: var(--accent);
+        font-weight: 700;
+        text-transform: uppercase;
+        font-size: 9px;
+        letter-spacing: 0.12em;
+        padding: 2px 6px;
+        border: 1px solid var(--accent);
+        border-radius: 3px;
+        white-space: nowrap;
+      }
+      .status-badge.hidden { display: none; }
+
+      /* Pills — icon + value, hover-tooltip via title attribute. Fixed
+         2-column grid so the rows stack 3-tall (kind/parent on row 1,
+         orbit/radius on row 2, mass/distance on row 3 for a planet). */
+      .pills {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 4px 10px;
+        margin-bottom: 6px;
+      }
+      .pill {
+        position: relative;
+        display: inline-flex;
+        align-items: baseline;
+        gap: 4px;
+        padding: 1px 0;
+        font-size: 11px;
+        line-height: 1.3;
+        color: var(--ink);
+        font-variant-numeric: tabular-nums;
+        cursor: help;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pill .icon {
+        color: var(--dim);
+        font-size: 11px;
+        min-width: 14px;
+        text-align: center;
+        font-style: normal;
+        flex-shrink: 0;
+      }
+      /* Custom CSS tooltip on hover — `data-tip` carries the full
+         label. Native `title` attributes are unreliable in sandboxed
+         iframes; this floats a small chip above the pill instead. */
+      .pill::after {
+        content: attr(data-tip);
+        position: absolute;
+        bottom: calc(100% + 4px);
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(4, 6, 10, 0.95);
+        color: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: 3px;
+        padding: 3px 7px;
+        font-size: 10px;
+        font-style: normal;
+        text-transform: none;
+        white-space: nowrap;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.12s;
+        z-index: 20;
+      }
+      .pill:hover::after { opacity: 1; }
+      /* Don't clip the tooltip — pill itself stays overflow:hidden for
+         truncating its own text, but the parent grid + body need to
+         allow the tooltip to escape upward. */
+      .pills, #content, #body { overflow: visible !important; }
+      #body { overflow-y: auto !important; }
+
+      .desc {
+        color: var(--ink);
+        font-size: 10.5px;
+        opacity: 0.85;
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top: 1px dashed var(--line);
+        font-style: italic;
+        line-height: 1.45;
+      }
+
+      /* Action button row — pinned at the bottom of the card. */
+      .actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--line);
+      }
+      .actions button {
+        flex: 1;
+        background: rgba(122, 215, 255, 0.06);
+        color: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: 3px;
+        padding: 5px 8px;
+        font: inherit;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        cursor: pointer;
+      }
+      .actions button:hover { background: rgba(122, 215, 255, 0.16); }
+      .actions button:disabled { opacity: 0.35; cursor: not-allowed; }
+      /* Stop is a destructive-ish action — paint it warning-orange so
+         it reads differently from the navigational Align/Warp pair. */
+      .actions button.stop {
+        color: var(--warn);
+        border-color: var(--warn);
+        background: rgba(255, 184, 107, 0.06);
+      }
+      .actions button.stop:hover { background: rgba(255, 184, 107, 0.16); }
+
+      /* Empty state — four small CSS corner brackets framing a centered
+         label. Mimics a camera/reticle focus frame with no box around
+         the text. Pure border tricks, no SVG. */
+      .empty {
+        position: relative;
+        height: 100%;
+        min-height: 120px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .empty::before,
+      .empty::after,
+      .empty .bl,
+      .empty .br {
+        content: "";
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        border: 1px solid var(--dim);
+        opacity: 0.55;
+      }
+      .empty::before { top: 10px; left: 10px;  border-right: none; border-bottom: none; }
+      .empty::after  { top: 10px; right: 10px; border-left: none;  border-bottom: none; }
+      .empty .bl     { bottom: 10px; left: 10px;  border-right: none; border-top: none; }
+      .empty .br     { bottom: 10px; right: 10px; border-left: none;  border-top: none; }
+      .empty .label {
+        color: var(--ink);
+        opacity: 0.85;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        font-style: italic;
+        letter-spacing: 0.02em;
+      }
+      .status {
+        display: inline-block;
+        margin-top: 4px;
+        padding: 2px 6px;
+        border: 1px solid var(--accent);
+        color: var(--accent);
+        border-radius: 3px;
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+      }
+    </style>
+  </head>
+  <body>
+    <header>TARGET</header>
+    <div id="body">
+      <div class="empty" id="empty-state">
+        <span class="bl"></span>
+        <span class="br"></span>
+        <span class="label">— no target locked —</span>
+      </div>
+      <div id="content" style="display:none">
+        <div class="title-row">
+          <div class="name" id="t-name">—</div>
+          <div class="status-badge hidden" id="t-status">⚡ WARPING</div>
+        </div>
+        <div class="pills" id="t-pills"></div>
+        <div class="desc" id="t-desc" style="display:none"></div>
+        <div class="actions">
+          <button id="btn-align" title="Face the camera at this target without warping">Align</button>
+          <button id="btn-warp"  title="Engage warp drive — auto-steer + ramp throttle to arrive at the target">Warp</button>
+          <button id="btn-stop"  class="stop" title="Cut throttle and disengage warp">Stop</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/target-info-main.ts"></script>
+  </body>
+</html>

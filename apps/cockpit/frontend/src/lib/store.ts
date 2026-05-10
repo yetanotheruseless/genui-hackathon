@@ -1,11 +1,13 @@
 import { create } from "zustand";
 
 // "side" hosts the compendium iframe.
-// "overview" is the EvE-style overview iframe — physically lives in the
-// same area as compendium but has its own slot so the host can mount
-// both and tab between them rather than swap. The "captain" slot is
-// gone — the Mind drives the app via the bridge pane now.
-export type SlotName = "viewport" | "side" | "overview" | "bottom";
+// "overview" is the EvE-style overview iframe — same physical area as
+// compendium, separate slot so the host can mount both and tab between
+// them rather than swap.
+// "target" is the small upper-right card showing details about the
+// locked target (kind-specific fields + distance + Align/Warp/Stop).
+// The "captain" slot is gone — the Mind drives the app via the bridge.
+export type SlotName = "viewport" | "side" | "overview" | "target" | "bottom";
 
 export type MountedSlot = {
   resourceUri: string;

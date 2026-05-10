@@ -54,9 +54,10 @@ export default function App() {
         // Sequential, not Promise.all — concurrent AppBridge.connect
         // calls on the same shared MCP Client race on its notification
         // handler state.
-        await callTool("open_overview",   { gameId: init.gameId, playerId: init.playerId });
-        await callTool("open_compendium", { gameId: init.gameId, playerId: init.playerId });
-        await callTool("open_bridge",     { gameId: init.gameId, playerId: init.playerId });
+        await callTool("open_overview",    { gameId: init.gameId, playerId: init.playerId });
+        await callTool("open_target_info", { gameId: init.gameId, playerId: init.playerId });
+        await callTool("open_compendium",  { gameId: init.gameId, playerId: init.playerId });
+        await callTool("open_bridge",      { gameId: init.gameId, playerId: init.playerId });
       } catch (e) {
         console.warn("[reattach] failed:", e);
       } finally {
@@ -79,11 +80,17 @@ export default function App() {
   }
 
   return (
-    <div className="relative grid h-screen grid-cols-[1fr_380px] grid-rows-[1fr_320px] gap-2 p-2">
+    <div className="relative grid h-screen grid-cols-[1fr_418px] grid-rows-[1fr_320px] gap-2 p-2">
       <Slot name="viewport" hint="cockpit · 3D viewport"       className="col-start-1 row-start-1" />
-      <SideArea                                                 className="col-start-2 row-start-1" />
-      {/* Bridge gets the full bottom row now that Captain is gone. */}
-      <Slot name="bottom"   hint="bridge · chat with the Mind" className="col-start-1 col-end-3 row-start-2" />
+      {/* Bridge no longer spans both columns — right column belongs to
+          the target info card + SideArea (overview/compendium tabs). */}
+      <Slot name="bottom"   hint="bridge · chat with the Mind" className="col-start-1 row-start-2" />
+      {/* Right column container spanning both rows. Target pane on top
+          (auto-height card), SideArea filling the rest. */}
+      <div className="col-start-2 row-start-1 row-end-3 flex flex-col gap-2 min-h-0">
+        <Slot name="target" hint="locked target details" className="flex-shrink-0 h-[224px]" />
+        <SideArea                                        className="flex-1 min-h-0" />
+      </div>
       <SwitchVesselButton />
     </div>
   );
@@ -101,7 +108,7 @@ function SwitchVesselButton() {
       variant="ghost"
       size="sm"
       onClick={reset}
-      className="absolute top-3 right-[395px] h-6 px-2 text-[10px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground"
+      className="absolute top-3 right-[433px] h-6 px-2 text-[10px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground"
       title="Clear the cached playerId and return to the Mind picker"
     >
       switch vessel

@@ -270,16 +270,147 @@ function render() {
   rowsEl.innerHTML = html;
 }
 
-rowsEl.addEventListener("click", (e) => {
+// --- Row interactions ----------------------------------------------------
+//
+// Single click   → set_target only (lock the cockpit reticle, no warp).
+// Double click   → align (set_target + face_target).
+// Right click    → context menu with explicit Target / Align / Warp options.
+//
+// Warp is only triggered explicitly via the right-click menu or the
+// target-info pane's Warp button — never as a side effect of a click.
+//
+// The single-click action is deferred by ~250 ms so a follow-up dblclick
+// can preempt it.
+
+const DBLCLICK_GUARD_MS = 250;
+let pendingClickTimer: number | null = null;
+
+function rowIdFromEvent(e: Event): string | null {
   const tr = (e.target as HTMLElement).closest("tr");
-  if (!tr) return;
-  const id = tr.getAttribute("data-id");
+  return tr?.getAttribute("data-id") ?? null;
+}
+
+function isStarRow(id: string): boolean { return id.startsWith("star:"); }
+function isOrbitalRow(id: string): boolean { return id.startsWith("orbital:"); }
+function isPlanetRow(id: string): boolean { return id.startsWith("planet:"); }
+// Planets are warpable — the cockpit resolves "planet:starId::name" to a
+// live orbital position and the server's warp_to passes planet ids through
+// untouched.
+function isWarpable(id: string): boolean {
+  return isStarRow(id) || isOrbitalRow(id) || isPlanetRow(id);
+}
+
+async function actionTarget(rowId: string) {
+  // set_target accepts the cockpit-side targetId format directly:
+  //   star    → bare star id (no prefix)
+  //   planet  → "planet:starId::name"
+  //   orbital → "orbital:<uuid>"
+  const targetId = isStarRow(rowId) ? rowId.slice("star:".length) : rowId;
+  await callTool(pane.app, "set_target", { gameId, playerId, targetId });
+}
+
+async function actionWarp(rowId: string) {
+  if (isOrbitalRow(rowId)) {
+    await callTool(pane.app, "warp_to_orbital", {
+      gameId, playerId, orbitalId: rowId.slice("orbital:".length),
+    });
+  } else if (isStarRow(rowId)) {
+    await callTool(pane.app, "warp_to", {
+      gameId, playerId, objectId: rowId.slice("star:".length),
+    });
+  } else if (isPlanetRow(rowId)) {
+    // server.warp_to passes "planet:..." ids through; cockpit steers
+    // toward the live orbital position.
+    await callTool(pane.app, "warp_to", { gameId, playerId, objectId: rowId });
+  } else {
+    // Ships aren't warpable — degrade to a target lock.
+    await actionTarget(rowId);
+  }
+}
+
+async function actionAlign(rowId: string) {
+  await actionTarget(rowId);
+  await callTool(pane.app, "face_target", { gameId, playerId });
+}
+
+rowsEl.addEventListener("click", (e) => {
+  const id = rowIdFromEvent(e);
   if (!id) return;
-  const row = buildRows().find((r) => r.id === id);
-  if (!row?.action) return;
-  void callTool(pane.app, row.action.tool, row.action.args).catch((err) => {
-    console.warn(`[overview] ${row.action!.tool} failed:`, err);
-  });
+  if (pendingClickTimer != null) {
+    window.clearTimeout(pendingClickTimer);
+    pendingClickTimer = null;
+  }
+  pendingClickTimer = window.setTimeout(() => {
+    pendingClickTimer = null;
+    void actionTarget(id).catch((err) => console.warn("[overview] set_target failed:", err));
+  }, DBLCLICK_GUARD_MS);
+});
+
+rowsEl.addEventListener("dblclick", (e) => {
+  const id = rowIdFromEvent(e);
+  if (!id) return;
+  if (pendingClickTimer != null) {
+    window.clearTimeout(pendingClickTimer);
+    pendingClickTimer = null;
+  }
+  void actionAlign(id).catch((err) => console.warn("[overview] align failed:", err));
+});
+
+rowsEl.addEventListener("contextmenu", (e) => {
+  const id = rowIdFromEvent(e);
+  if (!id) return;
+  e.preventDefault();
+  showContextMenu(e.clientX, e.clientY, id);
+});
+
+// --- Context menu --------------------------------------------------------
+
+const ctxMenu = document.getElementById("ctx-menu") as HTMLDivElement;
+
+function showContextMenu(x: number, y: number, rowId: string) {
+  // Position with a clamp so the menu doesn't overflow the iframe.
+  ctxMenu.style.display = "block";
+  // First show to measure, then clamp.
+  ctxMenu.style.left = "0px";
+  ctxMenu.style.top = "0px";
+  const w = ctxMenu.offsetWidth || 120;
+  const h = ctxMenu.offsetHeight || 80;
+  const cw = document.documentElement.clientWidth;
+  const ch = document.documentElement.clientHeight;
+  ctxMenu.style.left = `${Math.min(x, cw - w - 4)}px`;
+  ctxMenu.style.top  = `${Math.min(y, ch - h - 4)}px`;
+  ctxMenu.dataset.rowId = rowId;
+  // Disable "Warp" for non-warpable kinds (planets, ships).
+  const warpItem = ctxMenu.querySelector<HTMLButtonElement>("[data-action='warp']")!;
+  warpItem.disabled = !isWarpable(rowId);
+}
+function hideContextMenu() {
+  ctxMenu.style.display = "none";
+  ctxMenu.dataset.rowId = "";
+}
+
+ctxMenu.addEventListener("click", (e) => {
+  const btn = (e.target as HTMLElement).closest("button");
+  if (!btn || btn.disabled) return;
+  const action = btn.dataset.action;
+  const rowId = ctxMenu.dataset.rowId;
+  if (!action || !rowId) return;
+  hideContextMenu();
+  if (action === "target") void actionTarget(rowId).catch((err) => console.warn(err));
+  else if (action === "align") void actionAlign(rowId).catch((err) => console.warn(err));
+  else if (action === "warp")  void actionWarp(rowId).catch((err) => console.warn(err));
+});
+window.addEventListener("click", (e) => {
+  if (!ctxMenu.contains(e.target as Node)) hideContextMenu();
+}, true);
+window.addEventListener("scroll", hideContextMenu, true);
+window.addEventListener("contextmenu", (e) => {
+  // Suppress browser menu OUTSIDE of rows too (cleaner UX inside the
+  // pane); our custom handler above takes over for valid row clicks.
+  if (!(e.target as HTMLElement).closest("tr")) {
+    e.preventDefault();
+    hideContextMenu();
+  }
 });
 
 function escapeHtml(s: string): string {

@@ -47,19 +47,40 @@
       }
       .target-reticle .line.v { width: 1px; }
       .target-reticle .line.h { height: 1px; }
-      .target-reticle .label {
+      /* Two floating text rows under the reticle box — no panel chrome,
+         just glow against space. .status is the transient ship-state
+         indicator (warp/align), shown only when active. .readout is
+         speed · distance, shown whenever a target is locked + on-screen.
+         updateReticle() positions both per frame. */
+      .target-reticle .status,
+      .target-reticle .readout {
         position: absolute;
         transform: translateX(-50%);
-        background: rgba(4,6,10,0.75);
-        padding: 2px 7px;
-        border: 1px solid var(--accent);
-        border-radius: 3px;
-        color: var(--accent);
-        font-size: 10px;
         white-space: nowrap;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         text-transform: uppercase;
-        letter-spacing: 0.08em;
+        letter-spacing: 0.18em;
+        font-weight: 500;
+        pointer-events: none;
       }
+      .target-reticle .status {
+        font-size: 10px;
+        color: var(--accent);
+        text-shadow: 0 0 6px rgba(122,215,255,0.55);
+      }
+      /* Subtle pulse so "warp engaged" reads as live without screaming. */
+      .target-reticle .status.warp { animation: status-pulse 1.6s ease-in-out infinite; }
+      @keyframes status-pulse {
+        0%, 100% { opacity: 0.55; }
+        50%      { opacity: 1; }
+      }
+      .target-reticle .readout {
+        font-size: 10px;
+        color: var(--ink);
+        opacity: 0.78;
+      }
+      .target-reticle .readout .sep { color: var(--dim); margin: 0 0.55em; }
+      .target-reticle .readout .v { color: var(--accent); }
 
       .hud-bottom { position:absolute; left:0; right:0; bottom:0; padding:6px 10px; display:flex; gap:12px; align-items:center; background:rgba(4,6,10,.75); border-top:1px solid var(--line); }
       .throttle-wrap { flex:1; display:flex; align-items:center; gap:8px; }
@@ -148,9 +169,10 @@
         <div class="line v" id="reticle-line-bottom"></div>
         <div class="line h" id="reticle-line-left"></div>
         <div class="line h" id="reticle-line-right"></div>
-        <div class="label" id="reticle-label"></div>
+        <div class="status" id="reticle-status"></div>
+        <div class="readout" id="reticle-readout"></div>
       </div>
-      <div id="overlay"><span>click + drag to look · click any star or use the Overview to lock target</span></div>
+      <div id="overlay"><span>click + drag to look · click any body to target · double-click to align · then warp from the target panel</span></div>
       <div id="debug-log" class="hidden"></div>
       <div class="hud-bottom">
         <div class="throttle-wrap">

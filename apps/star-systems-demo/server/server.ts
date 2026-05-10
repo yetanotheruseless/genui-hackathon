@@ -174,6 +174,15 @@ type Player = {
    *  long as the player record itself does (i.e. tab refresh keeps them,
    *  reaper sweep clears them). Order = oldest first. */
   pinnedStarIds: string[];
+  /** Wall-clock ms of the most recent face_target() call. The cockpit
+   *  polls this and lerps the camera to face the current targetId
+   *  whenever it sees a newer ts than its last-handled value. One-shot
+   *  signal — no ongoing state to clear. */
+  faceRequestTs?: number;
+  /** Wall-clock ms of the most recent stop_engines() call. Same one-shot
+   *  pattern as faceRequestTs — cockpit polls and on a new ts cuts
+   *  throttle to 0 and disengages warp. */
+  stopRequestTs?: number;
 };
 
 type Orbital = {
@@ -565,19 +574,21 @@ const URI = {
   compendium: "ui://stars/compendium.html",
   bridge:     "ui://stars/bridge.html",
   overview:   "ui://stars/overview.html",
+  targetInfo: "ui://stars/target-info.html",
 } as const;
 
 // Slot hint for MCP Apps hosts that support a fixed multi-pane layout
 // (e.g. apps/cockpit). Goose-desktop ignores this and renders inline.
-// overview lives in its own slot so the store can hold both panes
-// simultaneously (the cockpit's SideArea component tabs between them
-// in the same physical area).
+// overview + target live in their own slots so the store can hold
+// each pane independently — the cockpit shell stacks the target pane
+// above the SideArea (overview/compendium tabs) in the right column.
 const SLOT = {
   [URI.lobby]:      "viewport",
   [URI.cockpit]:    "viewport",
   [URI.compendium]: "side",
   [URI.bridge]:     "bottom",
   [URI.overview]:   "overview",
+  [URI.targetInfo]: "target",
 } as const;
 
 type UiResourceUri = (typeof URI)[keyof typeof URI];
@@ -612,6 +623,7 @@ export function createServer(): McpServer {
   registerPaneResource(server, "Compendium", URI.compendium, "compendium.html");
   registerPaneResource(server, "Bridge",     URI.bridge,     "bridge.html");
   registerPaneResource(server, "Overview",   URI.overview,   "overview.html");
+  registerPaneResource(server, "TargetInfo", URI.targetInfo, "target-info.html");
 
   // --- ENTRY tools ----------------------------------------------------
 
@@ -825,8 +837,49 @@ export function createServer(): McpServer {
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
       player.targetId = args.targetId;
-      // warpEngaged stays as-is — set_target is "lock without engage."
+      // Selection ≠ warp engagement — explicitly clear so the cockpit's
+      // poll handler doesn't latch warpEngaged from a prior warp_to.
+      player.warpEngaged = false;
       return { content: [{ type: "text", text: JSON.stringify({ kind: "target_set", targetId: args.targetId }) }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "face_target",
+    {
+      title: "Face the camera at the locked target without warping",
+      description:
+        "Sets a one-shot timestamp (faceRequestTs) on the player. The cockpit polls this and lerps yaw/pitch to face whatever's currently in player.targetId, without engaging warp. Useful for the Align action button in the target-info pane.",
+      inputSchema: { gameId: z.string(), playerId: z.string() },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const player = getPlayer(getGalaxy(args.gameId), args.playerId);
+      if (!player.targetId) {
+        return { content: [{ type: "text", text: JSON.stringify({ kind: "no_target" }) }] };
+      }
+      player.faceRequestTs = Date.now();
+      return { content: [{ type: "text", text: JSON.stringify({ kind: "face_requested", ts: player.faceRequestTs }) }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "stop_engines",
+    {
+      title: "Cut throttle and disengage warp",
+      description:
+        "Sets a one-shot stopRequestTs on the player. The cockpit polls for it and on a new ts cuts ship.throttle to 0 and disengages warp. Useful for the Stop action button in the target-info pane.",
+      inputSchema: { gameId: z.string(), playerId: z.string() },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const player = getPlayer(getGalaxy(args.gameId), args.playerId);
+      player.warpEngaged = false;
+      player.throttle = 0;
+      player.stopRequestTs = Date.now();
+      return { content: [{ type: "text", text: JSON.stringify({ kind: "stopped", ts: player.stopRequestTs }) }] };
     },
   );
 
@@ -861,6 +914,43 @@ export function createServer(): McpServer {
             spectralType: s.spectralType,
             lumClass: s.lumClass,
             distanceLy: s.distanceLy,
+            planets: s.planets?.map((p) => ({
+              name: p.name, kind: p.kind, orbitAU: p.orbitAU,
+              massEarths: p.massEarths, radiusEarths: p.radiusEarths,
+            })) ?? [],
+          })),
+        }),
+      }] };
+    },
+  );
+
+  registerAppTool(
+    server,
+    "open_target_info",
+    {
+      title: "Open the target info pane",
+      description: "Mount the target-info iframe — small upper-right card showing kind-specific details (spectral type / planet kind+mass+radius / orbital builder+description) about whatever's locked.",
+      inputSchema: { gameId: z.string(), playerId: z.string() },
+      _meta: uiMeta(URI.targetInfo),
+    },
+    async (args) => {
+      const galaxy = getGalaxy(args.gameId);
+      const player = getPlayer(galaxy, args.playerId);
+      return { content: [{
+        type: "text",
+        text: JSON.stringify({
+          kind: "target_info_init",
+          gameId: galaxy.gameId,
+          playerId: player.playerId,
+          // Same star + planet payload as the overview — needed to
+          // resolve targetId → name/kind/orbit/etc.
+          stars: STARS.map((s) => ({
+            id: s.id,
+            name: s.name,
+            position: s.position,
+            spectralClass: s.spectralClass,
+            spectralType: s.spectralType,
+            lumClass: s.lumClass,
             planets: s.planets?.map((p) => ({
               name: p.name, kind: p.kind, orbitAU: p.orbitAU,
               massEarths: p.massEarths, radiusEarths: p.radiusEarths,
@@ -931,6 +1021,8 @@ export function createServer(): McpServer {
             hoveredId: player.hoveredId,
             targetId: player.targetId,
             warpEngaged: player.warpEngaged,
+            faceRequestTs: player.faceRequestTs,
+            stopRequestTs: player.stopRequestTs,
             dockedOrbitalId: player.dockedOrbitalId,
             ship: { name: player.shipName, class: player.shipClass },
             mind: { id: player.mind.id, name: player.mind.name },
@@ -1044,6 +1136,24 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
+      // Planet ids ("planet:<starId>::<name>") are resolved client-side
+      // by the cockpit (it knows the live orbital phase). The server
+      // just records the targetId + engages warp; the cockpit steers.
+      if (args.objectId.startsWith("planet:")) {
+        if (player.dockedOrbitalId) {
+          const galaxy = getGalaxy(args.gameId);
+          const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
+          if (prev) prev.dockedPlayerIds = prev.dockedPlayerIds.filter((id) => id !== player.playerId);
+          player.dockedOrbitalId = null;
+        }
+        player.targetId = args.objectId;
+        player.warpEngaged = true;
+        const sep = args.objectId.indexOf("::");
+        const planetName = sep >= 0 ? args.objectId.slice(sep + 2) : args.objectId;
+        return { content: [{ type: "text", text: JSON.stringify({
+          kind: "warp_engaged", targetId: args.objectId, name: planetName,
+        }) }] };
+      }
       const star = resolveStar(args.objectId);
       if (!star) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `unknown objectId: ${args.objectId}` }) }] };

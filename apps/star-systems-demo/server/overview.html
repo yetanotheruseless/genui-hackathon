@@ -89,7 +89,16 @@
         width: 100%;
         border-collapse: collapse;
         font-size: 11px;
+        table-layout: fixed;
       }
+      /* Fixed column widths. Distance gets a generous fixed allocation
+         so values like "0.0 l-min" and "31.8 AU" never truncate; name +
+         type + parent share what's left. icon is a small fixed column. */
+      thead th:nth-child(1), tbody td:nth-child(1) { width: 18px; padding-left: 6px; padding-right: 0; }
+      thead th:nth-child(2), tbody td:nth-child(2) { width: auto; }
+      thead th:nth-child(3), tbody td:nth-child(3) { width: 28%; }
+      thead th:nth-child(4), tbody td:nth-child(4) { width: 22%; }
+      thead th:nth-child(5), tbody td:nth-child(5) { width: 76px; padding-right: 8px; }
       thead th {
         position: sticky;
         top: 0;
@@ -140,6 +149,42 @@
         color: var(--dim);
         font-style: italic;
       }
+
+      /* Right-click context menu — Target / Align / Warp. Hidden until
+         contextmenu fires; positioned at the cursor; dismissed on any
+         click outside or scroll. */
+      #ctx-menu {
+        position: fixed;
+        display: none;
+        z-index: 100;
+        min-width: 110px;
+        background: rgba(4, 6, 10, 0.95);
+        border: 1px solid var(--accent);
+        border-radius: 4px;
+        padding: 4px 0;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+      }
+      #ctx-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        background: transparent;
+        color: var(--ink);
+        border: none;
+        padding: 5px 12px;
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      #ctx-menu button:hover:not(:disabled) {
+        background: rgba(122, 215, 255, 0.12);
+        color: var(--accent);
+      }
+      #ctx-menu button:disabled {
+        color: var(--dim);
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
     </style>
   </head>
   <body>
@@ -169,6 +214,12 @@
         </thead>
         <tbody id="rows"></tbody>
       </table>
+    </div>
+
+    <div id="ctx-menu">
+      <button data-action="target">Target</button>
+      <button data-action="align">Align</button>
+      <button data-action="warp">Warp</button>
     </div>
 
     <script type="module" src="/src/overview-main.ts"></script>

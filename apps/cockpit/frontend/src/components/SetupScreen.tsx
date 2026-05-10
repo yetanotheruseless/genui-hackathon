@@ -61,9 +61,10 @@ export function SetupScreen({ gameId }: { gameId: string }) {
       bindWsPlayer(init.gameId, init.playerId);
       // Sequential — concurrent AppBridge.connect on the same MCP
       // client races on shared notification handler state.
-      await callTool("open_overview",   { gameId: init.gameId, playerId: init.playerId });
-      await callTool("open_compendium", { gameId: init.gameId, playerId: init.playerId });
-      await callTool("open_bridge",     { gameId: init.gameId, playerId: init.playerId });
+      await callTool("open_overview",    { gameId: init.gameId, playerId: init.playerId });
+      await callTool("open_target_info", { gameId: init.gameId, playerId: init.playerId });
+      await callTool("open_compendium",  { gameId: init.gameId, playerId: init.playerId });
+      await callTool("open_bridge",      { gameId: init.gameId, playerId: init.playerId });
     } catch (e) {
       setErr(String(e));
       setBusy(false);

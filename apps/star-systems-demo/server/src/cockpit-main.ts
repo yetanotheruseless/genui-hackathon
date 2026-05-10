@@ -121,7 +121,11 @@ const reticleLineTop = document.getElementById("reticle-line-top") as HTMLDivEle
 const reticleLineBottom = document.getElementById("reticle-line-bottom") as HTMLDivElement;
 const reticleLineLeft = document.getElementById("reticle-line-left") as HTMLDivElement;
 const reticleLineRight = document.getElementById("reticle-line-right") as HTMLDivElement;
-const reticleLabel = document.getElementById("reticle-label") as HTMLDivElement;
+const reticleStatus = document.getElementById("reticle-status") as HTMLDivElement;
+const reticleReadout = document.getElementById("reticle-readout") as HTMLDivElement;
+// (Target info panel moved to its own iframe pane — see
+// target-info.html / src/target-info-main.ts. This used to live here
+// as a DOM overlay.)
 const warpOverlayEl = document.getElementById("warp-overlay") as HTMLElement | null;
 const debugLogEl = document.getElementById("debug-log") as HTMLElement | null;
 
@@ -753,6 +757,18 @@ const ship = {
   warpEngaged: false,
 };
 let lastSyncedTargetId: string | null = null;
+// Last face_target timestamp the cockpit has reacted to. Bumped from
+// the poll handler when state.faceRequestTs advances; the new value
+// triggers an aimTarget set so the camera lerps to face the target.
+let lastFaceRequestTs = 0;
+// Same one-shot pattern for stop_engines — newer ts ⇒ cut throttle +
+// disengage warp.
+let lastStopRequestTs = 0;
+// Arrival latch — once we arrive at a target, suppress re-engaging warp
+// from stale server polls until either (a) the target changes or (b) the
+// server's warpEngaged transitions false→true (a fresh warp_to call).
+let lastArrivedTargetId: string | null = null;
+let lastServerWarpEngaged = false;
 // Observe + autopilot-disengage fires when entering the brake range.
 // Tightened from a wide 0.15 ly cordon to BRAKE_RANGE_AU (100 AU), so
 // "arriving in a system" actually means you've reached planetary distances.
@@ -846,10 +862,26 @@ canvas.addEventListener("pointermove", (e) => {
   ship.pitch += dy * 0.004;
   ship.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, ship.pitch));
 });
+// Single click in the 3D viewport → set_target only (lock the reticle).
+// Double click → align (set_target + face_target). Warp is no longer
+// triggered by the viewport — use the target-info Warp button or the
+// Overview's right-click menu.
+const CANVAS_DBLCLICK_GUARD_MS = 250;
+let canvasClickTimer: number | null = null;
 canvas.addEventListener("pointerup", (e) => {
   dragging = false;
   canvas.releasePointerCapture(e.pointerId);
-  if (!dragMoved) pickStarUnderClick(e.clientX, e.clientY);
+  if (dragMoved) return;
+  const x = e.clientX, y = e.clientY;
+  if (canvasClickTimer != null) { window.clearTimeout(canvasClickTimer); canvasClickTimer = null; }
+  canvasClickTimer = window.setTimeout(() => {
+    canvasClickTimer = null;
+    pickAndAct(x, y, "target");
+  }, CANVAS_DBLCLICK_GUARD_MS);
+});
+canvas.addEventListener("dblclick", (e) => {
+  if (canvasClickTimer != null) { window.clearTimeout(canvasClickTimer); canvasClickTimer = null; }
+  pickAndAct(e.clientX, e.clientY, "align");
 });
 
 throttleEl.addEventListener("input", () => {
@@ -868,7 +900,9 @@ warpBtn.addEventListener("click", () => {
 });
 
 
-function pickStarUnderClick(clientX: number, clientY: number) {
+// Returns the targetId (raw star id, "orbital:<id>", or "planet:<starId>::<name>")
+// of the body closest to the given screen point, or null.
+function pickBodyUnderClick(clientX: number, clientY: number): string | null {
   const rect = canvas.getBoundingClientRect();
   const ndc = new THREE.Vector2(
     ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -878,6 +912,7 @@ function pickStarUnderClick(clientX: number, clientY: number) {
   raycaster.setFromCamera(ndc, camera);
   let bestId: string | null = null;
   let bestAngle = 0.04;
+  // Star sprites.
   for (const obj of starPoints.children) {
     if (!(obj instanceof THREE.Sprite)) continue;
     const v = obj.position.clone().sub(camera.position).normalize();
@@ -887,9 +922,7 @@ function pickStarUnderClick(clientX: number, clientY: number) {
       bestId = (obj.userData?.star as StarLite | undefined)?.id ?? null;
     }
   }
-  // Orbital icons share the same pick test against the same angular
-  // tolerance — pick whichever sprite is closest to the cursor ray, with
-  // an `orbital:` prefix so engageWarp routes to warp_to_orbital.
+  // Orbital icons.
   for (const sprite of orbitalIconLayer.children) {
     if (!(sprite instanceof THREE.Sprite)) continue;
     const v = sprite.position.clone().sub(camera.position).normalize();
@@ -900,7 +933,31 @@ function pickStarUnderClick(clientX: number, clientY: number) {
       bestId = oid ? `orbital:${oid}` : null;
     }
   }
-  if (bestId) engageWarp(bestId);
+  // Planet meshes — only pick visible ones (the per-frame visibility
+  // gate hides sub-pixel planets that you couldn't have meant to click).
+  for (const pm of planetMeshes) {
+    if (!pm.mesh.visible) continue;
+    const v = pm.mesh.position.clone().sub(camera.position).normalize();
+    const angle = v.angleTo(raycaster.ray.direction);
+    if (angle < bestAngle) {
+      bestAngle = angle;
+      bestId = `planet:${pm.starId}::${pm.planetName}`;
+    }
+  }
+  return bestId;
+}
+
+async function pickAndAct(clientX: number, clientY: number, action: "target" | "align") {
+  const id = pickBodyUnderClick(clientX, clientY);
+  if (!id || !gameId || !playerId) return;
+  try {
+    await callTool(pane.app, "set_target", { gameId, playerId, targetId: id });
+    if (action === "align") {
+      await callTool(pane.app, "face_target", { gameId, playerId });
+    }
+  } catch (e) {
+    console.warn(`[cockpit] pickAndAct(${action}) failed:`, e);
+  }
 }
 
 async function engageWarp(objectId: string) {
@@ -921,6 +978,9 @@ async function engageWarp(objectId: string) {
  *  null when the target is unknown locally (e.g. orbital still hasn't
  *  arrived in the get_state poll yet — callers should treat this as
  *  "wait for next tick"). */
+// (resolveTargetInfo lives in target-info-main.ts now — the cockpit
+// only needs position resolution for the reticle, below.)
+
 function resolveTargetPosition(id: string | null): { pos: [number, number, number]; isOrbital: boolean; name: string } | null {
   if (!id) return null;
   if (id.startsWith("orbital:")) {
@@ -1060,10 +1120,37 @@ function tick() {
       const dir = targetPos.clone().sub(ship.position);
       const dist = dir.length();
       dir.normalize();
-      const blend = Math.min(1, dt * 3);
-      const newFwd = fwd.lerp(dir, blend).normalize();
-      ship.yaw   = Math.atan2(newFwd.x, -newFwd.z);
-      ship.pitch = Math.asin(Math.max(-1, Math.min(1, newFwd.y)));
+
+      // Phase 1 (alignment): camera lerps to face the target with throttle
+      // pinned at 0. Without this, at high warp speeds the slow camera
+      // lerp + concurrent forward motion makes the ship arc around the
+      // target — the classic "flying in circles" symptom. We hold here
+      // until alignment is within ALIGN_TOLERANCE, then snap once and
+      // switch into Phase 2.
+      // Phase 2 (warp): yaw/pitch snap-track the live target direction
+      // each frame (the bearing changes as we move closer), throttle
+      // ramps to autopilotTargetThrottle, ship moves forward.
+      const ALIGN_TOLERANCE = 0.04;        // ~2.3°
+      const ALIGN_LERP_RATE = 6;           // rad/sec for the rotate-only phase
+      const cosErr = Math.max(-1, Math.min(1, fwd.dot(dir)));
+      const angleErr = Math.acos(cosErr);
+
+      if (angleErr > ALIGN_TOLERANCE) {
+        // Phase 1: rotate only, no movement.
+        const blend = Math.min(1, dt * ALIGN_LERP_RATE);
+        const newFwd = fwd.clone().lerp(dir, blend).normalize();
+        ship.yaw   = Math.atan2(newFwd.x, -newFwd.z);
+        ship.pitch = Math.asin(Math.max(-1, Math.min(1, newFwd.y)));
+        ship.throttle = 0;
+        throttleEl.value = "0";
+        // Skip the rest of warp tick (movement / arrival) until aligned.
+        const arrivalRangeSkip = target.isOrbital ? ORBITAL_DOCK_RANGE_LY : AUTOPILOT_ARRIVAL_LY;
+        void arrivalRangeSkip;       // silence unused: keep symmetric with Phase 2 arrival check
+      } else {
+        // Phase 2: snap to live bearing, no lerp — guarantees we never
+        // describe an arc around the target as we close on it.
+        ship.yaw   = Math.atan2(dir.x, -dir.z);
+        ship.pitch = Math.asin(Math.max(-1, Math.min(1, dir.y)));
       // Orbitals get a much tighter arrival distance than star systems —
       // the dock_orbital tool requires being within ~0.5 AU. For stars
       // we use AUTOPILOT_ARRIVAL_LY (1 AU) so the trip ends at planetary
@@ -1078,6 +1165,14 @@ function tick() {
         ship.warpEngaged = false;
         ship.throttle = 0;
         throttleEl.value = "0";
+        // Tell the server the warp is done — clears player.warpEngaged
+        // so the get_state poll doesn't keep re-engaging us next frame
+        // (and so the target-info pane's WARPING badge clears). One
+        // call per arrival per target, latched by lastArrivedTargetId.
+        if (gameId && playerId && lastArrivedTargetId !== ship.targetId) {
+          lastArrivedTargetId = ship.targetId;
+          void callTool(pane.app, "stop_engines", { gameId, playerId }).catch(() => {});
+        }
         if (target.isOrbital) {
           // Auto-dock on arrival. Server is the source of truth — it
           // re-checks the range and sets player.dockedOrbitalId, which
@@ -1093,6 +1188,7 @@ function tick() {
           }
         }
       }
+      }   // close Phase 2 else
     }
   }
 
@@ -1457,6 +1553,7 @@ function tick() {
 
   updateHud(fwd);
   updateReticle();
+  // (target info panel runs in its own iframe; no per-frame work here.)
   composer.render();
   requestAnimationFrame(tick);
 }
@@ -1550,7 +1647,6 @@ function updateReticle() {
   for (const ln of [reticleLineTop, reticleLineBottom, reticleLineLeft, reticleLineRight]) {
     ln.style.display = offEdge ? "none" : "";
   }
-  reticleLabel.style.display = offEdge ? "none" : "";
   const BOX = 56;       // box edge in px
   const GAP = 6;        // gap between box and edge lines
   const half = BOX / 2;
@@ -1584,16 +1680,73 @@ function updateReticle() {
   reticleLineRight.style.top = `${cy}px`;
   reticleLineRight.style.width = `${rightLineW}px`;
 
-  // Label below the box.
-  const d = new THREE.Vector3(...tgt.pos).distanceTo(ship.position);
-  reticleLabel.style.left = `${cx}px`;
-  reticleLabel.style.top = `${cy + half + GAP + 2}px`;
-  const tag = `${tgt.name}${tgt.isOrbital ? " ⟜" : ""} · ${formatDistance(d)}`;
-  if (reticleLabel.textContent !== tag) reticleLabel.textContent = tag;
+  // Two rows below the box, no panel chrome — sci-fi-minimal HUD.
+  //   row 1 (status):  thin glowing "▸ WARP" while warping, hidden otherwise.
+  //   row 2 (readout): SPEED · DISTANCE, always shown when target locked.
+  // Both hidden when the box is clamped to the viewport edge (off-screen
+  // target) — there's no visual room and the dot reads better alone.
+  const rowTop1 = cy + half + GAP + 4;     // status row baseline
+  const rowTop2 = rowTop1 + 14;            // readout row baseline (12px line + 2 leading)
+
+  if (offEdge) {
+    reticleStatus.style.display = "none";
+    reticleReadout.style.display = "none";
+  } else {
+    // Status row — only when warp is engaged.
+    if (ship.warpEngaged) {
+      reticleStatus.style.display = "";
+      reticleStatus.style.left = `${cx}px`;
+      reticleStatus.style.top = `${rowTop1}px`;
+      reticleStatus.classList.add("warp");
+      const wantStatus = "▸ warp engaged";
+      if (reticleStatus.textContent !== wantStatus) reticleStatus.textContent = wantStatus;
+    } else {
+      reticleStatus.style.display = "none";
+      reticleStatus.classList.remove("warp");
+    }
+    // Readout row — speed · distance.
+    reticleReadout.style.display = "";
+    reticleReadout.style.left = `${cx}px`;
+    reticleReadout.style.top = `${ship.warpEngaged ? rowTop2 : rowTop1}px`;
+    const distHtml = formatDistanceShort(toTarget.length());
+    const speedHtml = formatSpeedShort(ship.throttle);
+    const html = `<span class="v">${speedHtml}</span><span class="sep">·</span><span class="v">${distHtml}</span>`;
+    if (reticleReadout.innerHTML !== html) reticleReadout.innerHTML = html;
+  }
 
   if (!targetReticle.classList.contains("visible")) {
     targetReticle.classList.add("visible");
   }
+}
+
+// Reticle-readout formatters. Compact, mono-friendly, no units when the
+// next bigger one would have made the value < 0.01.
+function formatSpeedShort(throttle: number): string {
+  // Same speed model as updateHud: speed = throttle³ × WARP_MAX_LY_PER_S.
+  const lyPerS = Math.pow(throttle, 3) * WARP_MAX_LY_PER_S;
+  if (lyPerS < 0.005) {
+    // Sub-warp: c-fraction (impulse). 1 ly/s ≈ 31.6 million c, but in
+    // this game's number scale the small-throttle range maps cleanly to
+    // 0–1c via the same 200× factor used in updateHud's "impulse" tier.
+    const c = lyPerS * 200;
+    if (c < 0.01) return "0.00c";
+    return `${c.toFixed(2)}c`;
+  }
+  // Warp tier: round to nearest integer warp factor.
+  const warp = Math.min(9, Math.max(1, 1 + 2.22 * Math.log10(lyPerS / 0.005)));
+  return `warp ${Math.round(warp)}`;
+}
+
+function formatDistanceShort(ly: number): string {
+  if (ly >= 0.1) return `${ly.toFixed(2)} ly`;
+  if (ly >= 0.01) return `${ly.toFixed(3)} ly`;
+  const au = ly / LY_PER_AU;
+  if (au >= 100) return `${au.toFixed(0)} au`;
+  if (au >= 10) return `${au.toFixed(1)} au`;
+  if (au >= 0.1) return `${au.toFixed(2)} au`;
+  // Very close — light-minutes for sub-AU separation.
+  const lm = ly * 525949.2;
+  return `${lm.toFixed(1)} lmin`;
 }
 
 function resize() {
@@ -1631,7 +1784,45 @@ poll(200, async () => {
   if (state?.targetId && state.targetId !== lastSyncedTargetId) {
     lastSyncedTargetId = state.targetId;
     ship.targetId = state.targetId;
-    ship.warpEngaged = true;
+    // New target → reset arrival latch (fresh trip is allowed).
+    lastArrivedTargetId = null;
+  }
+  // Server-side warpEngaged sync, with the arrival latch in play:
+  //   - false → respect (set_target / stop_engines / our own arrival
+  //     stop_engines call all clear the flag server-side).
+  //   - true after a false → true transition → fresh warp_to: respect,
+  //     and clear the arrival latch (player explicitly re-engaged).
+  //   - true while latched on the current target → ignore (stale poll
+  //     between our arrival stop_engines call and the server processing
+  //     it; otherwise we'd re-engage warp every frame post-arrival).
+  if (state && typeof state.warpEngaged === "boolean") {
+    const serverWarp = state.warpEngaged;
+    const fresh = serverWarp && !lastServerWarpEngaged;
+    if (fresh) lastArrivedTargetId = null;
+    if (!serverWarp || ship.targetId !== lastArrivedTargetId) {
+      ship.warpEngaged = serverWarp;
+    }
+    lastServerWarpEngaged = serverWarp;
+  }
+  // face_target signal — when the target-info pane's Align button is
+  // pressed, the server stamps faceRequestTs. We lerp the camera to face
+  // the current target without engaging warp.
+  if (state?.faceRequestTs && state.faceRequestTs > lastFaceRequestTs) {
+    lastFaceRequestTs = state.faceRequestTs;
+    const tgt = resolveTargetPosition(ship.targetId);
+    if (tgt) {
+      const { targetYaw, targetPitch } = headingTo(tgt.pos, ship.position);
+      ship.warpEngaged = false;          // don't fight warp's auto-steer
+      aimTarget = { yaw: targetYaw, pitch: targetPitch };
+    }
+  }
+  // stop_engines signal — cut throttle + disengage warp. Same one-shot
+  // pattern as face_target.
+  if (state?.stopRequestTs && state.stopRequestTs > lastStopRequestTs) {
+    lastStopRequestTs = state.stopRequestTs;
+    ship.throttle = 0;
+    ship.warpEngaged = false;
+    throttleEl.value = "0";
   }
   if (state?.galaxy?.orbitals) syncOrbitals(state.galaxy.orbitals);
   if (state?.galaxy?.nearbyPlayers) syncOtherShips(state.galaxy.nearbyPlayers);
