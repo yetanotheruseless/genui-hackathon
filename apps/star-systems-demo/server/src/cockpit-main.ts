@@ -1249,7 +1249,12 @@ function tick() {
     //               your distance, you never end up inside it).
     const trueRadiusLy = (closest.star.radiusSolar ?? 1.0) * SOL_RADIUS_LY;
     const physicalLy = trueRadiusLy * STAR_VISUAL_SCALE;
-    const MIN_PX = 4;
+    // Min pixel floor MUST match the sprite's CORE_MAX_PX cap. Just
+    // outside CLOSE_MESH_RANGE_LY the sprite is at its max (~CORE_MAX_PX
+    // px); just inside, the sphere takes over. If the sphere's floor
+    // were lower (was 4 px), the body would visibly snap down in size
+    // at the handoff. With both at 60 px the transition is seamless.
+    const MIN_PX = 60;
     const minRadiusLy = minRadiusForPx(MIN_PX, closest.dist);
     const maxRadiusLy = STAR_MAX_SCREEN_FRAC * closest.dist * 1.4;
     const radiusLy = Math.min(maxRadiusLy, Math.max(physicalLy, minRadiusLy));
