@@ -260,8 +260,13 @@ function buildStarMeshes() {
     impulseSprite.userData = { star: s };
     impulseStars.add(impulseSprite);
 
-    // --- Planet ring (visible in both modes; small enough to read as
-    //     a halo at distance, not big enough to dominate up close).
+    // --- Planet ring: a 0.5-ly torus in each planet-bearing star's local
+    //     XZ plane. Reads as a tiny halo from across the galaxy ("this
+    //     star has planets") and is harmless when far. When you're parked
+    //     in-system though, the ring is ~3000× wider than your distance
+    //     to the star and fills the viewport with a pale plane that
+    //     occludes everything else. tick() hides this star's ring when
+    //     `closest.dist < BRAKE_RANGE_LY`; other stars' rings stay on.
     if (s.hasPlanets) {
       const ring = new THREE.Mesh(
         new THREE.TorusGeometry(0.5, 0.01, 4, 32),
@@ -269,6 +274,7 @@ function buildStarMeshes() {
       );
       ring.position.set(...s.position);
       ring.rotation.x = Math.PI / 2;
+      ring.userData = { starId: s.id };
       planetRings.add(ring);
     }
   }
@@ -661,6 +667,16 @@ function tick() {
     );
     closeStarMesh.visible = closest.dist > trueRadiusLy;  // hide if camera is inside the star's actual photosphere
 
+    // Hide THIS star's planet-halo ring when in-system — at 10 AU from
+    // Sol the 0.5-ly ring is 3000× wider than the camera-to-star
+    // distance and looks like a yellow plane filling the viewport. Other
+    // stars' rings stay visible so the rest of the catalog still reads
+    // as "halos = has planets".
+    for (const ring of planetRings.children) {
+      const isHere = (ring.userData as { starId?: string } | undefined)?.starId === closest.star.id;
+      ring.visible = !isHere;
+    }
+
     // Planets — render each at its real orbital distance (in AU), with a
     // "demo cheat" radius scale so they're visible. Slow Kepler-ish phase
     // animation: inner planets sweep visibly; outer planets crawl. Phase
@@ -730,6 +746,10 @@ function tick() {
     closeStarMesh.visible = false;
     hidePlanetPool();
     if (currentPlanets.length) currentPlanets = [];
+    // Out of any system — restore all halo rings.
+    for (const ring of planetRings.children) {
+      if (!ring.visible) ring.visible = true;
+    }
   }
 
   const speed = Math.pow(ship.throttle, 3) * 0.4;
