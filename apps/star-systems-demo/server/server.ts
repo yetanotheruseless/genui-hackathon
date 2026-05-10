@@ -104,6 +104,22 @@ function resolveStarName(id: string): string {
   return resolveStar(id)?.name ?? id;
 }
 
+/** Compact bright-catalog payload for the cockpit's THREE.Points backdrop.
+ *  Returns one entry per star: position (ly), spectral class single letter,
+ *  apparent magnitude (defaulted to absMag if missing). Curated stars are
+ *  filtered out — they're rendered with the rich layered-sprite system. */
+function brightStarsPayload(): Array<[number, number, number, string, number]> {
+  if (!_catalog) return [];
+  const curatedIds = new Set(STARS.map((s) => s.id));
+  const out: Array<[number, number, number, string, number]> = [];
+  for (const s of _catalog.bright) {
+    if (curatedIds.has(s.id)) continue;
+    const mag = s.apparentMag ?? s.absMag ?? 6;
+    out.push([s.position[0], s.position[1], s.position[2], s.spectralClass, mag]);
+  }
+  return out;
+}
+
 /** Short summary like "3 planets: 2× terrestrial, 1× gas_giant" or "" if none. */
 function planetSummaryFor(s: Star | CatalogStar | null): string {
   if (!s || !s.planets || s.planets.length === 0) return "";
@@ -582,6 +598,12 @@ export function createServer(): McpServer {
                 name: p.name, kind: p.kind, orbitAU: p.orbitAU, massEarths: p.massEarths,
               })) ?? [],
             })),
+            // Bright catalog for the starfield backdrop. Compact (no
+            // names/ids) — just position + spectral-class + magnitude.
+            // Cockpit builds a single THREE.Points cloud out of these,
+            // GPU draws ~17k stars in one call. Stars in the curated
+            // set above are filtered out so we don't double-render.
+            bright: brightStarsPayload(),
             llm: { provider: getProvider(), model: getModelName(), online: hasCredentials() },
             hint: `Open the other panes: open_compendium({gameId, playerId}), open_bridge({gameId, playerId}).`,
           }),

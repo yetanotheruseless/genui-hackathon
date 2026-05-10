@@ -725,12 +725,90 @@ async function engageWarp(objectId: string) {
   await callTool(pane.app, "warp_to", { gameId, playerId, objectId });
 }
 
+// Bright catalog backdrop. The server sends a packed array of
+// [x, y, z, spectralClass, apparentMag] per star. We build ONE
+// THREE.Points cloud for ~17k bright stars — single draw call, all
+// per-frame work is on the GPU. The curated 21 stars (which get the
+// rich layered-sprite + halo + spike treatment) are filtered out
+// server-side so we don't double-render.
+type BrightTuple = [number, number, number, string, number];
+const brightStarsGroup = new THREE.Group();
+scene.add(brightStarsGroup);
+
+function buildBrightStars(bright: BrightTuple[]) {
+  // Tear down any previous cloud (e.g. on a re-init).
+  while (brightStarsGroup.children.length) {
+    const c = brightStarsGroup.children[0];
+    brightStarsGroup.remove(c);
+    if ((c as THREE.Points).geometry) (c as THREE.Points).geometry.dispose();
+  }
+  if (!bright.length) return;
+
+  const N = bright.length;
+  const positions = new Float32Array(N * 3);
+  const colors = new Float32Array(N * 3);
+  const sizes = new Float32Array(N);
+  const tmpColor = new THREE.Color();
+  for (let i = 0; i < N; i++) {
+    const t = bright[i];
+    positions[i * 3 + 0] = t[0];
+    positions[i * 3 + 1] = t[1];
+    positions[i * 3 + 2] = t[2];
+    tmpColor.setHex(spectralColor(t[3], "V"));
+    colors[i * 3 + 0] = tmpColor.r;
+    colors[i * 3 + 1] = tmpColor.g;
+    colors[i * 3 + 2] = tmpColor.b;
+    // Pixel size by magnitude. Brighter = bigger; clamp so the brightest
+    // landmarks (Sirius mag −1.5, Canopus −0.7) are still readable points
+    // and the dimmest brights (mag ≤ 2.5) don't disappear.
+    const mag = t[4];
+    sizes[i] = Math.max(1.5, Math.min(5.5, 4.0 - mag * 0.8));
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("color",    new THREE.BufferAttribute(colors,    3));
+  geometry.setAttribute("size",     new THREE.BufferAttribute(sizes,     1));
+
+  // Custom shader: per-vertex point size, circular alpha falloff so the
+  // GL_POINT square is invisible.
+  const material = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    vertexColors: true,
+    vertexShader: `
+      attribute float size;
+      varying vec3 vColor;
+      void main() {
+        vColor = color;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_Position = projectionMatrix * mv;
+        gl_PointSize = size;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vColor;
+      void main() {
+        vec2 uv = gl_PointCoord - vec2(0.5);
+        float r = length(uv);
+        if (r > 0.5) discard;
+        float a = smoothstep(0.5, 0.0, r);
+        gl_FragColor = vec4(vColor, a);
+      }
+    `,
+  });
+  const points = new THREE.Points(geometry, material);
+  points.frustumCulled = false;     // bounding sphere is meaningless across 1000s of ly
+  brightStarsGroup.add(points);
+}
+
 // --- init ---
 pane.initial.then((init) => {
   gameId = init.gameId;
   playerId = init.playerId;
   stars = init.stars || [];
   buildStarMeshes();
+  if (init.bright && Array.isArray(init.bright)) buildBrightStars(init.bright as BrightTuple[]);
   if (init.llm) hudLlm.textContent = `${init.llm.online ? "" : "offline · "}${init.llm.provider}/${init.llm.model}`;
   if (init.ship && hudShip) hudShip.textContent = init.ship.name;
   if (init.ship && hudMind) hudMind.textContent = init.ship.class;
