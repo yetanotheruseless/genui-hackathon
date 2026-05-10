@@ -19,6 +19,7 @@ type PlanetLite = {
   kind: string;            // PlanetKind: terrestrial / super_earth / neptune_like / ice_giant / gas_giant / hot_jupiter / super_jupiter
   orbitAU?: number;
   massEarths?: number;
+  radiusEarths?: number;   // measured/estimated R⊕; cockpit prefers this over the kind-based default
 };
 type StarLite = {
   id: string; name: string; position: [number, number, number];
@@ -42,6 +43,23 @@ const EARTH_RADIUS_LY = EARTH_RADIUS_AU * LY_PER_AU;
 // below human visual resolution, never visible. 200× makes Earth ~1° at
 // 1 AU, big enough to see and recognize without dominating the system.
 const PLANET_VISUAL_SCALE = 200;
+// Stars get the SAME multiplier so relative sizing is right — without
+// this, planets (200× cheat) appear larger than stars (1× true scale)
+// at the same viewing distance, which is backwards. The screen-fraction
+// cap below keeps Sol from filling the viewport when you're sub-AU.
+const STAR_VISUAL_SCALE = 200;
+// Hard ceiling on the rendered star sphere's apparent size, in viewport
+// fractions. With STAR_VISUAL_SCALE Sol's inflated radius is 0.93 AU —
+// inside that distance perspective would make it screen-spanning. The
+// cap keeps the sphere at a sane size and lets you fly "through" it.
+const STAR_MAX_SCREEN_FRAC = 0.25;
+// Halo sizing — shared between the SPRITE halo (far stars) and the
+// closeStarMesh halo (in-system). Same formula on both sides means the
+// halo doesn't visibly jump at the sprite↔sphere handoff. The cap is
+// what dominates at any reasonable distance (a 7× of a 60-px sphere is
+// ~420 px, the cap pegs that to ~315 px / 36% viewport).
+const STAR_HALO_RATIO = 7.0;
+const STAR_HALO_MAX_SCREEN_FRAC = 0.18;
 
 const PLANET_RADIUS_R_EARTH: Record<string, number> = {
   terrestrial: 0.9,
@@ -127,8 +145,14 @@ function dbg(msg: string, kind: "info" | "warn" = "info") {
 }
 
 // Press ` (backtick) to toggle the on-screen debug overlay.
+// Press L to toggle the debug fill light (full ambient = "see everything").
 window.addEventListener("keydown", (e) => {
   if (e.key === "`") debugLogEl?.classList.toggle("hidden");
+  if (e.key === "l" || e.key === "L") {
+    debugLightOn = !debugLightOn;
+    debugFillLight.intensity = debugLightOn ? 1.5 : 0;
+    dbg(`debug fill light ${debugLightOn ? "ON" : "OFF"}`);
+  }
 });
 
 const pane = setupPaneApp("Culture Cockpit");
@@ -172,9 +196,10 @@ const renderPass = new RenderPass(scene, camera);
 composer.addPass(renderPass);
 const bloomPass = new UnrealBloomPass(
   new THREE.Vector2(1, 1),  // resized in resize()
-  0.30,   // strength (was 0.55 — cuts the smear that turned 1-10ly stars into white discs)
-  0.20,   // radius   (was 0.35 — kernel can no longer reach 35% of viewport)
-  0.85,   // threshold (was 0.7 — only the very brightest pixels contribute to bloom)
+  0.5,    // strength
+  0.32,   // radius
+  0.78,   // threshold — Sol's luminance is ~0.92, so this lets stars
+          // bloom while keeping planet day-sides (~0.5–0.7) below.
 );
 composer.addPass(bloomPass);
 
@@ -226,6 +251,7 @@ const closeStarMesh = new THREE.Mesh(
 closeStarMesh.visible = false;
 closeStarMesh.renderOrder = 5;
 scene.add(closeStarMesh);
+// closeStarHalo is created later, once HALO_TEX has been declared.
 
 // One omni-light that follows whichever star you're parked next to.
 // Cheaper than 21 PointLights affecting every fragment everywhere; the
@@ -237,6 +263,15 @@ systemLight.visible = false;
 scene.add(systemLight);
 // Faint ambient so the night side of planets isn't a void.
 scene.add(new THREE.AmbientLight(0xffffff, 0.06));
+
+// Debug fill light, off by default. Press L to toggle. When on, every
+// Lambert surface (planets, orbital outer ring) is fully lit so you can
+// see the night side of bodies and verify positions / colors during
+// development. Doesn't affect MeshBasicMaterial bodies (stars, sprites,
+// closeStarMesh) since those ignore lighting entirely.
+const debugFillLight = new THREE.AmbientLight(0xffffff, 0);
+scene.add(debugFillLight);
+let debugLightOn = false;
 
 // ---- Procedural sprite textures (no asset files shipped) ---------------
 function makeRadialTexture(stops: [number, number][], size = 128): THREE.Texture {
@@ -331,6 +366,25 @@ function makeOrbitalIconTexture(size = 256): THREE.Texture {
 }
 const ORBITAL_ICON_TEX = makeOrbitalIconTexture(256);
 
+// Halo sprite that always rides with closeStarMesh. Without this, with
+// conservative bloom settings a small unlit-disc star reads exactly
+// like a Lambert-shaded planet (both are spheres). The halo gives every
+// close star an unmistakable "this is a light source" glow that planets
+// can't have — additive, tinted by spectral colour per-frame, sized as
+// a multiple of the close-star sphere radius.
+const closeStarHalo = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: HALO_TEX,
+  color: 0xffffff,
+  sizeAttenuation: true,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+  opacity: 0.85,
+}));
+closeStarHalo.visible = false;
+closeStarHalo.renderOrder = 4;
+scene.add(closeStarHalo);
+
 // One planet mesh per known planet across the whole catalog. They're real
 // world-space spheres at fixed physical radius (PLANET_VISUAL_SCALE × real),
 // so apparent size scales with camera distance via perspective — no popping
@@ -398,60 +452,48 @@ function buildStarMeshes() {
     const color = spectralColor(s.spectralClass, s.lumClass);
     const isSupergiant = s.lumClass === "Ia" || s.lumClass === "Iab" || s.lumClass === "Ib";
 
-    // Class-derived spike scale factor (lens-flare-ish artifact size,
-    // independent of magnitude — varies because hot/blue stars look
-    // pointier than cool/red ones in real photographs).
-    const spikeScaleFactor = isSupergiant ? Math.sqrt(0.24 / 0.08)
-                           : s.spectralClass === "B" ? Math.sqrt(0.16 / 0.08)
-                           : s.spectralClass === "A" ? Math.sqrt(0.13 / 0.08)
-                           : s.spectralClass === "F" ? Math.sqrt(0.10 / 0.08)
-                           : 1.0;
+    // Bases tuned so a G dwarf at 4 ly is ~10 px (after the per-frame
+    // min-pixel floor stops applying); closer in, perspective takes over
+    // and stars bloom until closeStarMesh swaps in. Supergiants stay
+    // visibly larger than M dwarfs at every distance.
+    const starSize = isSupergiant ? 0.24
+                   : s.spectralClass === "WD" ? 0.024
+                   : s.spectralClass === "M"  ? 0.04
+                   : s.spectralClass === "K"  ? 0.06
+                   : s.spectralClass === "G"  ? 0.08
+                   : s.spectralClass === "F"  ? 0.10
+                   : s.spectralClass === "A"  ? 0.13
+                   : s.spectralClass === "B"  ? 0.16
+                   : 0.06;
 
-    // Pre-fetch absMag (with class-fallback in case a server entry
-    // somehow lacks it). Drives the per-frame pixel sizing so the
-    // sprite halo is bounded by *observed magnitude*, not by scaling
-    // a world-space radius — far-and-mid-range stars used to balloon
-    // because the world-unit halo only shrank as 1/d while the close
-    // mesh didn't take over until 0.1 ly.
-    const fallbackAbsMag = isSupergiant ? -6
-                         : s.spectralClass === "WD" ? 12
-                         : s.spectralClass === "M"  ? 12
-                         : s.spectralClass === "K"  ? 7
-                         : s.spectralClass === "G"  ? 4.85
-                         : s.spectralClass === "F"  ? 3.5
-                         : s.spectralClass === "A"  ? 1.5
-                         : s.spectralClass === "B"  ? -1
-                         : 5;
-    const absMag = s.absMag ?? fallbackAbsMag;
-
-    // CORE — circular bright disc, additive. Pixel-stable
-    // (sizeAttenuation:false) so a star never grows past its
-    // magnitude-derived pixel size regardless of how close we get,
-    // until closeStarMesh swaps in at 0.1 ly. White-tinted so bloom
-    // reads "saturated highlight" regardless of spectral hue.
+    // CORE — circular bright disc, additive. World-space sizing
+    // (sizeAttenuation:true) so behind-camera sprites get culled by
+    // Three.js automatically. White-tinted so bloom reads "saturated
+    // highlight" regardless of spectral hue.
     const core = new THREE.Sprite(new THREE.SpriteMaterial({
       map: CORE_TEX,
       color: 0xffffff,
-      sizeAttenuation: false,
+      sizeAttenuation: true,
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     }));
+    core.scale.set(starSize, starSize, 1);
     core.position.set(...s.position);
-    core.userData = { star: s, absMag, spikeScaleFactor, isSupergiant };
+    core.userData = { star: s, baseSize: starSize, isSupergiant };
     warpStars.add(core);
 
-    // HALO — soft Gaussian, tinted by spectral colour. Pixel-stable
-    // too; per-frame sizing reads observed magnitude and assigns
-    // halo px = 3 × core px.
+    // HALO — soft Gaussian, tinted by spectral colour. World-space
+    // scale = HALO_RATIO × core (set per-frame). Naturally vanishes at
+    // far distances ⇒ free LOD.
     const halo = new THREE.Sprite(new THREE.SpriteMaterial({
       map: HALO_TEX,
       color,
-      sizeAttenuation: false,
+      sizeAttenuation: true,
       transparent: true,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
-      opacity: 0.7,
+      opacity: 0.85,
     }));
     halo.position.set(...s.position);
     halo.renderOrder = 2;
@@ -480,7 +522,12 @@ function buildStarMeshes() {
     // single roving systemLight gives a proper day/night terminator
     // when you're parked next to the parent star.
     for (const p of s.planets ?? []) {
-      const r = (PLANET_RADIUS_R_EARTH[p.kind] ?? 1) * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
+      // Prefer measured radius (R⊕) when the catalog has it (Sol's
+      // planets, TRAPPIST-1, etc.); fall back to a kind-based default.
+      // PLANET_VISUAL_SCALE inflation is applied either way so the
+      // bodies are visible at AU distances.
+      const radiusR = p.radiusEarths ?? PLANET_RADIUS_R_EARTH[p.kind] ?? 1;
+      const r = radiusR * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
       const mat = new THREE.MeshLambertMaterial({
         color: PLANET_COLOR[p.kind] ?? 0xaaaaaa,
         fog: false,
@@ -650,7 +697,7 @@ function createOrbitalLayers(o: OrbitalLite): OrbitalLayers {
     new THREE.MeshBasicMaterial({
       color: tint,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.45,
       side: THREE.DoubleSide,
       fog: false,
       depthWrite: false,
@@ -1008,11 +1055,13 @@ function buildBrightStars(bright: BrightTuple[]) {
   geometry.setAttribute("size",     new THREE.BufferAttribute(sizes,     1));
 
   // Custom shader: per-vertex point size, circular alpha falloff so the
-  // GL_POINT square is invisible.
+  // GL_POINT square is invisible. NormalBlending (not additive) so 17k
+  // points across the celestial sphere don't stack into a uniform cream
+  // wash that bloom then amplifies into white-out.
   const material = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
+    blending: THREE.NormalBlending,
     vertexColors: true,
     vertexShader: `
       attribute float size;
@@ -1159,6 +1208,85 @@ function tick() {
     if (closest === null || dCpa < closest.dist) closest = { star: s, dist: dCpa, tCpa };
   }
 
+  // Autobrake fires HERE (early in tick, right after closest finder)
+  // so the post-brake throttle is known before any visual scale calcs.
+  // The CPA/lookahead in `closest` lets us catch fast approaches that
+  // would otherwise step over the cordon in a single frame.
+  //
+  // Departure pass-through: outside the inner ~10 AU AND clearly heading
+  // away (radialDot < threshold), we DON'T brake — lets you ramp back
+  // to full warp the moment you've cleared a planetary system instead
+  // of crawling out to 100 AU at 0.025 throttle. Inside INNER_AU we
+  // always brake (planets live there; a misaimed yaw could put you on
+  // top of Earth before you noticed).
+  //
+  // We DO NOT disengage warp here. Autopilot shares maxImpulseThrottle
+  // via autopilotTargetThrottle — when brake fires for the autopilot's
+  // target star they agree on throttle and the autopilot rides smoothly
+  // all the way down to AUTOPILOT_ARRIVAL_LY (1 AU). Autopilot itself
+  // clears warpEngaged on arrival; brake just bounds speed.
+  const INNER_AU = 10;
+  const DEPARTING_DOT_THRESHOLD = -0.2;   // ~cos(101°): clearly off-axis
+  if (closest && closest.dist < BRAKE_RANGE_LY) {
+    const distAu = closest.dist / LY_PER_AU;
+    const dxNow = closest.star.position[0] - ship.position.x;
+    const dyNow = closest.star.position[1] - ship.position.y;
+    const dzNow = closest.star.position[2] - ship.position.z;
+    const dNow = Math.hypot(dxNow, dyNow, dzNow);
+    const radialDot = dNow > 0 ? (dxNow * fwd.x + dyNow * fwd.y + dzNow * fwd.z) / dNow : 0;
+    const departing = radialDot < DEPARTING_DOT_THRESHOLD;
+    const insideInner = distAu < INNER_AU;
+    const shouldBrake = insideInner || !departing;
+    if (shouldBrake) {
+      const cap = maxImpulseThrottle(distAu);
+      if (ship.throttle > cap) {
+        const prev = ship.throttle;
+        ship.throttle = cap;
+        throttleEl.value = ship.throttle.toString();
+        dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
+      }
+      // Snap-to-entry: if we crossed the brake boundary mid-segment
+      // (CPA happens at t > 0 from current position), warp the ship
+      // forward to where we'd cross the 100-AU boundary. Without this
+      // a Sol→Rigel flight that grazes another star's brake range
+      // stops 12 000+ AU short of the system the brake was for.
+      if (closest.tCpa > 0 && dNow > BRAKE_RANGE_LY && segLen > 0) {
+        const sDotV = dxNow * vSeg.x + dyNow * vSeg.y + dzNow * vSeg.z;
+        const sLenSq = dxNow * dxNow + dyNow * dyNow + dzNow * dzNow;
+        const a = vSegLenSq;
+        const b = -2 * sDotV;
+        const c = sLenSq - BRAKE_RANGE_LY * BRAKE_RANGE_LY;
+        const disc = b * b - 4 * a * c;
+        if (disc >= 0) {
+          const tEntry = Math.max(0, Math.min(1, (-b - Math.sqrt(disc)) / (2 * a)));
+          ship.position.addScaledVector(vSeg, tEntry);
+          dbg(`[brake] snap to entry of ${closest.star.name} (t=${tEntry.toFixed(3)} of segment, ${(segLen * tEntry).toFixed(3)}ly)`);
+        }
+      }
+    }
+    // Auto-observe on first entry into a system. Fires regardless of
+    // departing status — flying through still counts as observing.
+    if (!observed.has(closest.star.id) && gameId && playerId) {
+      observed.add(closest.star.id);
+      void callTool(pane.app, "observe", { gameId, playerId, objectId: closest.star.id });
+    }
+  }
+
+  // Re-derive closest.dist using the POST-brake speed (and POST-snap
+  // position) so all the scale calcs below see the distance the camera
+  // will actually be at when we render. Without this, when autobrake
+  // clamps throttle the body visibly shrinks for one frame each time.
+  if (closest) {
+    const speedFinal = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
+    const fx = fwd.x * speedFinal * dt;
+    const fy = fwd.y * speedFinal * dt;
+    const fz = fwd.z * speedFinal * dt;
+    const sx = closest.star.position[0] - (ship.position.x + fx);
+    const sy = closest.star.position[1] - (ship.position.y + fy);
+    const sz = closest.star.position[2] - (ship.position.z + fz);
+    closest.dist = Math.hypot(sx, sy, sz);
+  }
+
   // Update every planet's world position from its orbital phase. Hide
   // planets whose star is far enough that the planet would subtend less
   // than ~0.3 px — saves draw calls for the ~25 planets in the catalog.
@@ -1170,88 +1298,54 @@ function tick() {
   const minRadiusForPx = (px: number, d: number) => (px * d * 0.7 * 2) / canvasH;
   const minVisibleRadiusAt = (d: number) => minRadiusForPx(0.3, d);
 
-  // Magnitude-driven pixel-stable star sizing.
+  // Per-frame three-layer star scaling. Core gets the min-pixel floor
+  // for distant visibility AND a max-pixel cap so it can never grow
+  // larger than ~CORE_MAX_PX on screen — without that cap, a base 0.08 ly
+  // sprite at 0.01 ly distance is 8× the viewport and bloom turns the
+  // whole frame to flat white. Halo follows core in world units, also
+  // capped. Spike is in pixel units and fades as the core blooms past
+  // a few pixels.
   //
-  // For each star we compute observed apparent magnitude given current
-  // distance: m = M + 5·log10(d_pc / 10), where M is the star's
-  // absolute magnitude (real values from astrodata for the curated 21).
-  //
-  // Pixel mapping calibration:
-  //   m =  0   (Vega from Earth)             →  corePx ≈ 8,  haloPx ≈ 24
-  //   m = -5   (Venus-bright)                →  corePx ≈ 13, haloPx ≈ 39
-  //   m = -10  (closer than 0.5 ly to Sol)   →  corePx ≈ 18, haloPx ≈ 54
-  //   m = -16+ (saturating; close-mesh time) →  corePx capped at 20
-  //   m = +5   (dim naked-eye)               →  corePx ≈ 3,  haloPx ≈ 9
-  //   m > +12  (below detection)             →  hidden entirely
-  //
-  // This bounds the apparent size of every star at every distance until
-  // closeStarMesh takes over at CLOSE_MESH_RANGE_LY (0.1 ly). Replaces
-  // the old world-unit halo (which scaled as 1/d and had to be capped
-  // by hand at every range — caps were the source of "Sol fills the
-  // viewport at 3.54 ly").
-  const PC_PER_LY = 1 / 3.2615637967;
-  const CORE_PX_MIN = 0.6;
-  const CORE_PX_MAX = 20;
-  const HALO_PX_RATIO = 3.0;
-  const HIDE_MAG = 12;
-  const SPIKE_BASE_PX = 28;
-  // Manual behind-camera cull. With sizeAttenuation:false sprites,
-  // Three.js doesn't reliably cull sprites whose world position is
-  // behind the camera — the projected `w` goes negative and the sprite
-  // can render at a screen-space-flipped location, producing a giant
-  // mirrored ghost of e.g. the star you're parked next to. We need to
-  // explicitly hide any sprite whose star is outside the front
-  // hemisphere. The 0.05 dot threshold (~87°) keeps stars visible
-  // right up to the frustum's right/left edges (~60° at typical
-  // aspect ratios) while culling everything farther back.
-  const FRONT_HEMISPHERE_DOT = 0.05;
+  // sizeAttenuation:true (world-space) for core+halo means Three.js
+  // handles behind-camera culling automatically — we don't need a
+  // manual front-hemisphere check the way the briefly-tried pixel-
+  // stable approach did (that's where the mirrored-ghost-of-Vega-when-
+  // looking-away artifact came from).
+  const STAR_MIN_PX = 1.5;
+  const CORE_MAX_PX = 60;             // sprite core hard cap (lets closeStarMesh take over)
+  const HALO_RATIO = STAR_HALO_RATIO;             // shared with closeStarMesh halo
+  const HALO_MAX_SCREEN_FRAC = STAR_HALO_MAX_SCREEN_FRAC;  // shared with closeStarMesh halo
+  const SPIKE_BASE_PX = 28;           // pixel-size of spike for a G dwarf core
   for (const layers of starLayers.values()) {
-    const ud = layers.core.userData as { absMag: number; spikeScaleFactor: number };
+    const ud = layers.core.userData as { baseSize?: number };
+    const base = ud.baseSize ?? 0.06;
     const sx = layers.core.position.x - ship.position.x;
     const sy = layers.core.position.y - ship.position.y;
     const sz = layers.core.position.z - ship.position.z;
-    const d = Math.max(1e-6, Math.hypot(sx, sy, sz));
-    const dotFwd = (sx * fwd.x + sy * fwd.y + sz * fwd.z) / d;
-    if (dotFwd < FRONT_HEMISPHERE_DOT) {
-      if (layers.core.visible)  layers.core.visible  = false;
-      if (layers.halo.visible)  layers.halo.visible  = false;
-      if (layers.spike.visible) layers.spike.visible = false;
-      continue;
-    }
-    const mObs = ud.absMag + 5 * Math.log10(d * PC_PER_LY / 10);
-
-    if (mObs > HIDE_MAG) {
-      if (layers.core.visible)  layers.core.visible  = false;
-      if (layers.halo.visible)  layers.halo.visible  = false;
-      if (layers.spike.visible) layers.spike.visible = false;
-      continue;
-    }
-    if (!layers.core.visible)  layers.core.visible  = true;
-    if (!layers.halo.visible)  layers.halo.visible  = true;
-    if (!layers.spike.visible) layers.spike.visible = true;
-
-    const corePx = Math.min(CORE_PX_MAX, Math.max(CORE_PX_MIN, 8 - mObs));
-    const haloPx = corePx * HALO_PX_RATIO;
-    const coreS = (corePx * 2) / canvasH;
-    const haloS = (haloPx * 2) / canvasH;
-    layers.core.scale.set(coreS, coreS, 1);
-    layers.halo.scale.set(haloS, haloS, 1);
-
-    const spikePx = SPIKE_BASE_PX * ud.spikeScaleFactor;
+    const d = Math.hypot(sx, sy, sz);
+    const minR = minRadiusForPx(STAR_MIN_PX, d);
+    const maxR = minRadiusForPx(CORE_MAX_PX, d);
+    const coreR = Math.min(maxR, Math.max(base, minR));
+    layers.core.scale.set(coreR, coreR, 1);
+    // World radius that subtends HALO_MAX_SCREEN_FRAC of the viewport
+    // height at this distance — the cap.
+    const haloMaxWorld = (HALO_MAX_SCREEN_FRAC * d * 1.4);
+    const haloR = Math.min(coreR * HALO_RATIO, haloMaxWorld);
+    layers.halo.scale.set(haloR, haloR, 1);
+    // Spike size: scale with spectral class (via base ratio), fixed pixels.
+    // sizeAttenuation:false sprite.scale ≈ NDC fraction; multiplying by 2
+    // gives full-screen-height units, so px / canvasH * 2 ≈ pixels.
+    const spikePx = SPIKE_BASE_PX * Math.sqrt(base / 0.08);
     const spikeS = (spikePx * 2) / canvasH;
     layers.spike.scale.set(spikeS, spikeS, 1);
-
-    // Halo fades to zero past the core-cap so there's no "stuck giant
-    // halo" once we cross into close-mesh territory; the closeStarMesh
-    // sphere takes the visual lead. Below the cap the halo is at full
-    // strength.
-    const haloFade = Math.max(0, 1 - Math.max(0, corePx - 16) / 4);
-    (layers.halo.material as THREE.SpriteMaterial).opacity = 0.7 * haloFade;
-    // Spike (lens-cross artifact) fades the brighter the core gets —
-    // point sources twinkle, resolved discs don't. At m ≈ 0 we're at
-    // ~50% spike, at m ≈ -5 ~10%.
-    const spikeFade = Math.max(0, 1 - Math.max(0, corePx - 4) / 8);
-    (layers.spike.material as THREE.SpriteMaterial).opacity = 0.55 * spikeFade;
+    // Fade spike as the core grows past floor — point sources twinkle,
+    // resolved discs do not.
+    const fade = Math.max(0, 1 - (coreR - minR) / (base * 4));
+    (layers.spike.material as THREE.SpriteMaterial).opacity = 0.55 * fade;
+    // Halo fades a touch when the core is sub-pixel-floor (we don't want
+    // a giant halo around a single-pixel pinprick at 50 ly).
+    const haloFade = Math.min(1, coreR / (base * 0.5));
+    (layers.halo.material as THREE.SpriteMaterial).opacity = 0.6 * haloFade;
   }
   // Planet update + currentPlanets[] build for the nearest-planets list.
   // currentPlanets is populated only for planets orbiting the in-system
@@ -1294,101 +1388,50 @@ function tick() {
   // and lets it grow smoothly as you approach — closes the visible gap
   // between the sprite and the in-system view.
   if (closest && closest.dist < CLOSE_MESH_RANGE_LY) {
-    // Real radius for proper-scale rendering, BUT also clamp to a
-    // minimum apparent size in pixels so M dwarfs / white dwarfs don't
-    // become subpixel ghosts. Stellar/atlas apps do this to keep tiny
-    // stars findable. Big stars (Betelgeuse) render at true scale
-    // because true scale already exceeds the floor.
+    // Star sphere radius:
+    //   physical  — real R☉ × SOL_RADIUS_LY × STAR_VISUAL_SCALE.
+    //               Same 200× cheat we use on planets, so Sol/Jupiter/
+    //               Earth keep their ~109/11/1 relative ratio.
+    //   minR      — pixel floor so distant stars stay visible (~4 px).
+    //   maxR      — viewport-fraction ceiling so close approaches don't
+    //               fill the screen (and so you can fly "through" the
+    //               inflated sphere — its world radius shrinks with
+    //               your distance, you never end up inside it).
     const trueRadiusLy = (closest.star.radiusSolar ?? 1.0) * SOL_RADIUS_LY;
-    const MIN_PX = 4;
+    const physicalLy = trueRadiusLy * STAR_VISUAL_SCALE;
+    // Min pixel floor MUST match the sprite's CORE_MAX_PX cap. Just
+    // outside CLOSE_MESH_RANGE_LY the sprite is at its max (~CORE_MAX_PX
+    // px); just inside, the sphere takes over. If the sphere's floor
+    // were lower (was 4 px), the body would visibly snap down in size
+    // at the handoff. With both at 60 px the transition is seamless.
+    const MIN_PX = 60;
     const minRadiusLy = minRadiusForPx(MIN_PX, closest.dist);
-    const radiusLy = Math.max(trueRadiusLy, minRadiusLy);
+    const maxRadiusLy = STAR_MAX_SCREEN_FRAC * closest.dist * 1.4;
+    const radiusLy = Math.min(maxRadiusLy, Math.max(physicalLy, minRadiusLy));
     closeStarMesh.position.set(...closest.star.position);
     closeStarMesh.scale.setScalar(radiusLy);
-    (closeStarMesh.material as THREE.MeshBasicMaterial).color.setHex(
-      spectralColor(closest.star.spectralClass, closest.star.lumClass),
-    );
-    closeStarMesh.visible = closest.dist > trueRadiusLy;  // hide if camera is inside the star's actual photosphere
+    const tint = spectralColor(closest.star.spectralClass, closest.star.lumClass);
+    (closeStarMesh.material as THREE.MeshBasicMaterial).color.setHex(tint);
+    // Photosphere check uses TRUE radius — only hide if camera is
+    // inside the actual star, not just inside the inflated geometry.
+    closeStarMesh.visible = closest.dist > trueRadiusLy;
+
+    // Halo: same formula as the sprite halo so the apparent size is
+    // identical at the sprite↔sphere handoff (CLOSE_MESH_RANGE_LY).
+    // Without this the halo visibly snaps when crossing the boundary.
+    closeStarHalo.position.set(...closest.star.position);
+    const haloMaxWorld = STAR_HALO_MAX_SCREEN_FRAC * closest.dist * 1.4;
+    const haloR = Math.min(radiusLy * STAR_HALO_RATIO, haloMaxWorld);
+    closeStarHalo.scale.set(haloR, haloR, 1);
+    (closeStarHalo.material as THREE.SpriteMaterial).color.setHex(tint);
+    closeStarHalo.visible = closeStarMesh.visible;
   } else {
     closeStarMesh.visible = false;
+    closeStarHalo.visible = false;
   }
 
-  // Autobrake / observe-on-entry / planet visibility / systemLight stay
-  // gated on the tighter BRAKE_RANGE_LY (≈ 100 AU) — those are gameplay
-  // states, not visual ones (closeStarMesh is on its own wider range).
-  //
-  // Departure pass-through: if we're outside the inner ~10 AU AND clearly
-  // heading away from the star (negative radial velocity, i.e. fwd dotted
-  // with the unit vector toward the star is negative), don't brake. This
-  // lets you ramp back to full warp the moment you've cleared the
-  // planetary system, instead of crawling out to 100 AU at 0.1 c.
-  // Inside the inner core we always brake regardless of direction —
-  // planets live there and a misaimed yaw could drop you onto Earth.
-  const INNER_AU = 10;
-  const DEPARTING_DOT_THRESHOLD = -0.2;   // ~cos(101°): clearly off-axis from star
-  if (closest && closest.dist < BRAKE_RANGE_LY) {
-    const distAu = closest.dist / LY_PER_AU;
-    const toStar = new THREE.Vector3(
-      closest.star.position[0] - ship.position.x,
-      closest.star.position[1] - ship.position.y,
-      closest.star.position[2] - ship.position.z,
-    );
-    const toStarLen = toStar.length() || 1;
-    const radialDot = (toStar.x * fwd.x + toStar.y * fwd.y + toStar.z * fwd.z) / toStarLen;
-    const departing = radialDot < DEPARTING_DOT_THRESHOLD;
-    const insideInner = distAu < INNER_AU;
-    const shouldBrake = insideInner || !departing;
-    if (shouldBrake) {
-      // Autobrake — clamp throttle to a sub-warp value. SNAP rather
-      // than smooth: the cubic speed law means a smoothed ramp takes
-      // ~10 frames, during which we'd fly clean through the system at
-      // high warp.
-      //
-      // Note: we deliberately DO NOT disengage warp here. Autopilot
-      // shares this same speed-cap ladder via autopilotTargetThrottle,
-      // so when the brake fires for the autopilot's target star they
-      // agree on throttle and the autopilot rides smoothly all the way
-      // down to AUTOPILOT_ARRIVAL_LY (1 AU). Autopilot is the thing
-      // that finally clears warpEngaged; brake just bounds speed.
-      const cap = maxImpulseThrottle(distAu);
-      if (ship.throttle > cap) {
-        const prev = ship.throttle;
-        ship.throttle = cap;
-        throttleEl.value = ship.throttle.toString();
-        dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
-      }
-      // Snap-to-entry: if we entered brake range from outside DURING this
-      // frame's segment (i.e. CPA happens at t > 0), warp the ship to
-      // the brake-range entry point along its trajectory. Without this,
-      // a Sol→Rigel run that grazes another star's brake range stops
-      // 12 000+ AU short of where the brake would normally place us.
-      const dxNow = closest.star.position[0] - ship.position.x;
-      const dyNow = closest.star.position[1] - ship.position.y;
-      const dzNow = closest.star.position[2] - ship.position.z;
-      const dNow  = Math.hypot(dxNow, dyNow, dzNow);
-      if (closest.tCpa > 0 && dNow > BRAKE_RANGE_LY && segLen > 0) {
-        // Solve |s − t·vSeg|² = R² for the entry t (smaller root).
-        const sDotV = dxNow * vSeg.x + dyNow * vSeg.y + dzNow * vSeg.z;
-        const sLenSq = dxNow * dxNow + dyNow * dyNow + dzNow * dzNow;
-        const a = vSegLenSq;
-        const b = -2 * sDotV;
-        const c = sLenSq - BRAKE_RANGE_LY * BRAKE_RANGE_LY;
-        const disc = b * b - 4 * a * c;
-        if (disc >= 0) {
-          const tEntry = Math.max(0, Math.min(1, (-b - Math.sqrt(disc)) / (2 * a)));
-          ship.position.addScaledVector(vSeg, tEntry);
-          dbg(`[brake] snap to entry of ${closest.star.name} (t=${tEntry.toFixed(3)} of segment, ${(segLen * tEntry).toFixed(3)}ly)`);
-        }
-      }
-    }
-    // Auto-observe on first entry into a system (LLM Mind narrates).
-    // Fires regardless of whether we braked — flying through a system
-    // still counts as observing it.
-    if (!observed.has(closest.star.id) && gameId && playerId) {
-      observed.add(closest.star.id);
-      void callTool(pane.app, "observe", { gameId, playerId, objectId: closest.star.id });
-    }
-  }
+  // (Autobrake + observe were here — now hoisted up to before the scale
+  // calcs, see the BRAKE_RANGE block right after the closest finder.)
 
   // Hide the sprite of whichever star is being drawn as a sphere —
   // otherwise the sprite layers double-render on top of closeStarMesh.
