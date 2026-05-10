@@ -1148,6 +1148,48 @@ function tick() {
     if (closest === null || d < closest.dist) closest = { star: s, dist: d };
   }
 
+  // Autobrake fires HERE (moved up from below the scale block) so the
+  // post-brake throttle is known before we set any visual scales. Using
+  // the pre-brake nextPos prediction above lets us catch fast approaches
+  // even when a single frame would step over the cordon.
+  if (closest && closest.dist < BRAKE_RANGE_LY) {
+    const distAu = closest.dist / LY_PER_AU;
+    // Hard SNAP rather than smooth — the cubic speed law (s = throttle³·0.4)
+    // means a smoothed ramp from 1.0 to 0.025 takes ~10 frames, during which
+    // we'd cover 2000+ AU and fly clean through the system.
+    const cap = maxImpulseThrottle(distAu);
+    if (ship.throttle > cap) {
+      const prev = ship.throttle;
+      ship.throttle = cap;
+      throttleEl.value = ship.throttle.toString();
+      dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
+    }
+    if (ship.warpEngaged) {
+      ship.warpEngaged = false;
+      dbg(`[brake] disengaged warp at ${closest.star.name} (${distAu.toFixed(1)}AU)`);
+    }
+    if (!observed.has(closest.star.id) && gameId && playerId) {
+      observed.add(closest.star.id);
+      void callTool(pane.app, "observe", { gameId, playerId, objectId: closest.star.id });
+    }
+  }
+
+  // Re-derive closest.dist using the POST-brake speed so all the scale
+  // calcs below see the distance the camera will actually be at when
+  // we render. Without this, when the user pushes throttle while in
+  // brake range, scale assumes the pre-brake (longer) movement and the
+  // body visibly shrinks for one frame each time autobrake clamps.
+  if (closest) {
+    const speedFinal = Math.pow(ship.throttle, 3) * 0.4;
+    const fx = fwd.x * speedFinal * dt;
+    const fy = fwd.y * speedFinal * dt;
+    const fz = fwd.z * speedFinal * dt;
+    const sx = closest.star.position[0] - (ship.position.x + fx);
+    const sy = closest.star.position[1] - (ship.position.y + fy);
+    const sz = closest.star.position[2] - (ship.position.z + fz);
+    closest.dist = Math.hypot(sx, sy, sz);
+  }
+
   // Update every planet's world position from its orbital phase. Hide
   // planets whose star is far enough that the planet would subtend less
   // than ~0.3 px — saves draw calls for the ~25 planets in the catalog.
@@ -1287,34 +1329,8 @@ function tick() {
     closeStarHalo.visible = false;
   }
 
-  // Autobrake / observe-on-entry / planet visibility / systemLight stay
-  // gated on the tighter BRAKE_RANGE_LY (≈ 100 AU) — those are gameplay
-  // states, not visual ones (closeStarMesh is on its own wider range).
-  if (closest && closest.dist < BRAKE_RANGE_LY) {
-    const distAu = closest.dist / LY_PER_AU;
-    // Autobrake — clamp throttle to a sub-warp value, and disengage
-    // autopilot if it was steering us here. SNAP rather than smooth: the
-    // cubic speed law (s = throttle³·0.4) means a smoothed ramp from 1.0
-    // to 0.025 takes ~10 frames, during which we'd cover 2000+ AU and
-    // fly clean through the system. A hard clamp is the only way to keep
-    // the ship inside the cordon.
-    const cap = maxImpulseThrottle(distAu);
-    if (ship.throttle > cap) {
-      const prev = ship.throttle;
-      ship.throttle = cap;
-      throttleEl.value = ship.throttle.toString();
-      dbg(`[brake] ${closest.star.name}: dist=${distAu.toFixed(1)}AU throttle ${prev.toFixed(2)}→${cap.toFixed(3)}`);
-    }
-    if (ship.warpEngaged) {
-      ship.warpEngaged = false;
-      dbg(`[brake] disengaged warp at ${closest.star.name} (${distAu.toFixed(1)}AU)`);
-    }
-    // Auto-observe on first entry into a system (LLM Mind narrates).
-    if (!observed.has(closest.star.id) && gameId && playerId) {
-      observed.add(closest.star.id);
-      void callTool(pane.app, "observe", { gameId, playerId, objectId: closest.star.id });
-    }
-  }
+  // (Autobrake + observe were here — now hoisted up to before the scale
+  // calcs, see the BRAKE_RANGE block right after the closest finder.)
 
   // Hide all three sprite layers for whichever star is being drawn as a
   // sphere — otherwise the halo, sized in world units, balloons to fill
