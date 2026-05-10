@@ -8,6 +8,9 @@
  * and renders Orbitals as ring sprites.
  */
 import * as THREE from "three";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 
 import { callTool, poll, setupPaneApp } from "./shared.js";
 
@@ -132,20 +135,56 @@ scene.fog = new THREE.FogExp2(0x040814, 0.0005);
 // pair it with a logarithmic depth buffer.
 const camera = new THREE.PerspectiveCamera(70, 1, 1e-7, 5000);
 camera.position.set(0, 0, 0);
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, logarithmicDepthBuffer: true });
+// `logarithmicDepthBuffer` is required to render the 1e-7 near plane
+// alongside the 5000 ly far plane (5×10^10 ratio, way past 32-bit
+// depth precision). ACES tone mapping + sRGB output works with the
+// bloom pass; OutputPass is intentionally absent because combining it
+// with renderer.toneMapping double-applies the operator.
+const renderer = new THREE.WebGLRenderer({
+  canvas,
+  antialias: true,
+  logarithmicDepthBuffer: true,
+});
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-// Two parallel star groups; only one is visible at a time.
-//   `warpStars`    — current size-attenuated big sprites; visible when
-//                    flying at warp speeds (target star grows naturally).
-//   `impulseStars` — small fixed-pixel sprites; ~1-5 px on screen
-//                    regardless of distance, so a system you're parked
-//                    in doesn't wash out the viewport.
-const warpStars = new THREE.Group();
-const impulseStars = new THREE.Group();
-const planetRings = new THREE.Group();   // shared between both modes
+// Postprocessing: just the bloom pass on top of the rendered scene.
+// Skipping OutputPass on purpose — combining it with renderer.toneMapping
+// double-applies the operator and creates the saturated horizontal smear.
+// Bloom math runs on tone-mapped pixels here (not strictly HDR) but for
+// our content (a few bright sprites against black) it reads correctly.
+const composer = new EffectComposer(renderer);
+const renderPass = new RenderPass(scene, camera);
+composer.addPass(renderPass);
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(1, 1),  // resized in resize()
+  0.55,   // strength
+  0.35,   // radius
+  0.7,    // threshold — only the brightest cores contribute
+);
+composer.addPass(bloomPass);
+
+// Stars are rendered as three additive layers per body:
+//   `coreLayer`  — small bright disc (procedural radial gradient texture).
+//                  Sized by max(physical, minPx) so it stays visible far
+//                  away and blooms physically when close. Picker still
+//                  raycasts against this group (kept as `warpStars`).
+//   `haloLayer`  — soft Gaussian halo, tinted by spectral colour, additive.
+//                  Sized as a multiple of the core in world units, so it
+//                  shrinks naturally with distance ⇒ free LOD: a halo at
+//                  40 ly is sub-pixel and costs nothing in fillrate.
+//   `spikeLayer` — 4-point diffraction cross, fixed pixel size (lens
+//                  artifact, not a physical thing). Faded when the core
+//                  has bloomed past a few pixels — so it pops on distant
+//                  pinprick stars and politely steps out of the way up
+//                  close where the halo carries the look.
+const warpStars = new THREE.Group();        // core layer (also the picker target)
+const haloLayer = new THREE.Group();
+const spikeLayer = new THREE.Group();
 scene.add(warpStars);
-scene.add(impulseStars);
-scene.add(planetRings);
+scene.add(haloLayer);
+scene.add(spikeLayer);
 const orbitalGroup = new THREE.Group();
 scene.add(orbitalGroup);
 const otherShipsGroup = new THREE.Group();
@@ -155,6 +194,8 @@ scene.add(otherShipsGroup);
 // when no star is within BRAKE_RANGE; shown at proper physical scale
 // (radius in light-years computed from R☉) when you're parked in a
 // system. M dwarfs become tiny dots; supergiants fill the sky.
+// MeshBasicMaterial = unlit / fully emissive — bloom turns it into a
+// proper glowing photosphere.
 const closeStarMesh = new THREE.Mesh(
   new THREE.SphereGeometry(1, 48, 32),
   new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false }),
@@ -163,24 +204,96 @@ closeStarMesh.visible = false;
 closeStarMesh.renderOrder = 5;
 scene.add(closeStarMesh);
 
-// Planet mesh pool — sized for the largest catalog system (Sol, 8 planets;
-// TRAPPIST-1 has 7). One geometry shared, one material per slot so we
-// can recolor independently. Hidden when not in a system.
-const PLANET_POOL_SIZE = 12;
+// One omni-light that follows whichever star you're parked next to.
+// Cheaper than 21 PointLights affecting every fragment everywhere; the
+// single light gets repositioned in tick(). decay=0 because our world is
+// in light-years (1 AU = 1.58e-5 ly) and physical inverse-square would
+// blow up at sub-AU distances.
+const systemLight = new THREE.PointLight(0xffffff, 1.0, 0, 0);
+systemLight.visible = false;
+scene.add(systemLight);
+// Faint ambient so the night side of planets isn't a void.
+scene.add(new THREE.AmbientLight(0xffffff, 0.06));
+
+// ---- Procedural sprite textures (no asset files shipped) ---------------
+function makeRadialTexture(stops: [number, number][], size = 128): THREE.Texture {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d")!;
+  const r = size / 2;
+  const g = ctx.createRadialGradient(r, r, 0, r, r, r);
+  for (const [pos, alpha] of stops) g.addColorStop(pos, `rgba(255,255,255,${alpha})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const CORE_TEX = makeRadialTexture(
+  [[0, 1], [0.4, 0.95], [0.8, 0.5], [1, 0]],
+  64,
+);
+// Halo: smooth rolloff to fully transparent well before the texture
+// edge, so the square texture quad never registers as a faint box
+// against black sky under additive blending.
+const HALO_TEX = makeRadialTexture(
+  [[0, 0.35], [0.08, 0.18], [0.25, 0.05], [0.5, 0.005], [0.7, 0]],
+  256,
+);
+function makeSpikeTexture(size = 256): THREE.Texture {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d")!;
+  ctx.translate(size / 2, size / 2);
+  const drawSpike = (rotDeg: number, length: number, thickness: number, peak: number) => {
+    ctx.save();
+    ctx.rotate((rotDeg * Math.PI) / 180);
+    const g = ctx.createLinearGradient(0, -length, 0, length);
+    g.addColorStop(0, "rgba(255,255,255,0)");
+    g.addColorStop(0.48, `rgba(255,255,255,${peak * 0.6})`);
+    g.addColorStop(0.5, `rgba(255,255,255,${peak})`);
+    g.addColorStop(0.52, `rgba(255,255,255,${peak * 0.6})`);
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(-thickness / 2, -length, thickness, length * 2);
+    ctx.restore();
+  };
+  // Long primaries (vertical + horizontal); short secondaries (diagonals).
+  drawSpike(0,  size / 2, 1.6, 0.95);
+  drawSpike(90, size / 2, 1.6, 0.95);
+  drawSpike(45, size / 3, 1.0, 0.45);
+  drawSpike(-45, size / 3, 1.0, 0.45);
+  // Hot pinprick at the center so the core never washes out.
+  const cg = ctx.createRadialGradient(0, 0, 0, 0, 0, size / 16);
+  cg.addColorStop(0, "rgba(255,255,255,1)");
+  cg.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = cg;
+  ctx.fillRect(-size / 16, -size / 16, size / 8, size / 8);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+const SPIKE_TEX = makeSpikeTexture(256);
+
+// One planet mesh per known planet across the whole catalog. They're real
+// world-space spheres at fixed physical radius (PLANET_VISUAL_SCALE × real),
+// so apparent size scales with camera distance via perspective — no popping
+// in at a brake threshold. Subpixel from light-years away, growing smoothly
+// as you approach. Built lazily in buildStarMeshes().
 const planetGeom = new THREE.SphereGeometry(1, 24, 16);
-type PlanetSlot = { mesh: THREE.Mesh; mat: THREE.MeshBasicMaterial };
-const planetPool: PlanetSlot[] = [];
-for (let i = 0; i < PLANET_POOL_SIZE; i++) {
-  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, fog: false });
-  const mesh = new THREE.Mesh(planetGeom, mat);
-  mesh.visible = false;
-  mesh.renderOrder = 4;
-  scene.add(mesh);
-  planetPool.push({ mesh, mat });
-}
-function hidePlanetPool() {
-  for (const slot of planetPool) if (slot.mesh.visible) slot.mesh.visible = false;
-}
+type PlanetMesh = {
+  mesh: THREE.Mesh;
+  starId: string;
+  starName: string;
+  planetName: string;
+  planetKind: string;
+  starPos: [number, number, number];
+  orbitLy: number;
+  phaseSeed: number;
+  phaseSpeed: number;
+  physicalR: number;     // real radius (with PLANET_VISUAL_SCALE) in ly
+};
+const planetMeshes: PlanetMesh[] = [];
 function planetPhaseSeed(starId: string, planetName: string): number {
   let h = 0;
   const s = `${starId}::${planetName}`;
@@ -211,79 +324,120 @@ function spectralColor(cls: string, lum: string): number {
   }
 }
 
+// Map: starId → its three sprite layers, used in tick() to scale and
+// fade them per-frame without a hash lookup per child. Cleared and
+// rebuilt by buildStarMeshes().
+type StarLayers = { core: THREE.Sprite; halo: THREE.Sprite; spike: THREE.Sprite };
+const starLayers = new Map<string, StarLayers>();
+
 function buildStarMeshes() {
   warpStars.clear();
-  impulseStars.clear();
-  planetRings.clear();
+  haloLayer.clear();
+  spikeLayer.clear();
+  starLayers.clear();
+  for (const m of planetMeshes) scene.remove(m.mesh);
+  planetMeshes.length = 0;
+
   for (const s of stars) {
     const color = spectralColor(s.spectralClass, s.lumClass);
     const isSupergiant = s.lumClass === "Ia" || s.lumClass === "Iab" || s.lumClass === "Ib";
 
-    // --- Warp-mode sprite: size in light-years, attenuates with distance.
-    //     Same scale we shipped originally; gets big as you approach.
-    const warpSize = isSupergiant ? 1.2
-                   : s.spectralClass === "WD" ? 0.12
-                   : s.spectralClass === "M"  ? 0.20
-                   : s.spectralClass === "K"  ? 0.30
-                   : s.spectralClass === "G"  ? 0.40
-                   : s.spectralClass === "F"  ? 0.50
-                   : s.spectralClass === "A"  ? 0.65
-                   : s.spectralClass === "B"  ? 0.80
-                   : 0.30;
-    const warpSprite = new THREE.Sprite(new THREE.SpriteMaterial({
-      color, sizeAttenuation: true, transparent: true, opacity: 0.95,
-    }));
-    warpSprite.scale.set(warpSize, warpSize, 1);
-    warpSprite.position.set(...s.position);
-    warpSprite.userData = { star: s };
-    warpStars.add(warpSprite);
+    // Bases tuned so a G dwarf at 4 ly is ~10 px (after the per-frame
+    // min-pixel floor stops applying); closer in, perspective takes over
+    // and stars bloom until closeStarMesh swaps in. Supergiants stay
+    // visibly larger than M dwarfs at every distance.
+    const starSize = isSupergiant ? 0.24
+                   : s.spectralClass === "WD" ? 0.024
+                   : s.spectralClass === "M"  ? 0.04
+                   : s.spectralClass === "K"  ? 0.06
+                   : s.spectralClass === "G"  ? 0.08
+                   : s.spectralClass === "F"  ? 0.10
+                   : s.spectralClass === "A"  ? 0.13
+                   : s.spectralClass === "B"  ? 0.16
+                   : 0.06;
 
-    // --- Impulse-mode sprite: pixel-stable, sized by spectral class so
-    //     supergiants stand out from M dwarfs in a starfield. Numbers
-    //     are scale-units of `sizeAttenuation:false` sprites; with our
-    //     ~70deg FOV and typical canvas size each unit ≈ 200-400 pixels,
-    //     so values around 0.005-0.015 give 1-5 px stars.
-    const impulseSize = isSupergiant ? 0.014
-                      : s.spectralClass === "WD" ? 0.004
-                      : s.spectralClass === "M"  ? 0.005
-                      : s.spectralClass === "K"  ? 0.006
-                      : s.spectralClass === "G"  ? 0.007
-                      : s.spectralClass === "F"  ? 0.008
-                      : s.spectralClass === "A"  ? 0.010
-                      : s.spectralClass === "B"  ? 0.012
-                      : 0.006;
-    const impulseSprite = new THREE.Sprite(new THREE.SpriteMaterial({
-      color, sizeAttenuation: false, transparent: true, opacity: 1.0,
+    // CORE — circular bright disc, additive. White-tinted texture so the
+    // bloom pass reads "saturated highlight" regardless of spectral hue.
+    // Picker still raycasts against this group; userData kept compatible.
+    const core = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: CORE_TEX,
+      color: 0xffffff,
+      sizeAttenuation: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
     }));
-    impulseSprite.scale.set(impulseSize, impulseSize, 1);
-    impulseSprite.position.set(...s.position);
-    impulseSprite.userData = { star: s };
-    impulseStars.add(impulseSprite);
+    core.scale.set(starSize, starSize, 1);
+    core.position.set(...s.position);
+    core.userData = { star: s, baseSize: starSize, isSupergiant };
+    warpStars.add(core);
 
-    // --- Planet ring: a 0.5-ly torus in each planet-bearing star's local
-    //     XZ plane. Reads as a tiny halo from across the galaxy ("this
-    //     star has planets") and is harmless when far. When you're parked
-    //     in-system though, the ring is ~3000× wider than your distance
-    //     to the star and fills the viewport with a pale plane that
-    //     occludes everything else. tick() hides this star's ring when
-    //     `closest.dist < BRAKE_RANGE_LY`; other stars' rings stay on.
-    if (s.hasPlanets) {
-      const ring = new THREE.Mesh(
-        new THREE.TorusGeometry(0.5, 0.01, 4, 32),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.3, side: THREE.DoubleSide }),
-      );
-      ring.position.set(...s.position);
-      ring.rotation.x = Math.PI / 2;
-      ring.userData = { starId: s.id };
-      planetRings.add(ring);
+    // HALO — soft Gaussian, tinted by spectral colour. World-space scale
+    // = HALO_RATIO × core (set per-frame). Naturally vanishes at far
+    // distances ⇒ free LOD.
+    const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: HALO_TEX,
+      color,
+      sizeAttenuation: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      opacity: 0.85,
+    }));
+    halo.position.set(...s.position);
+    halo.renderOrder = 2;
+    haloLayer.add(halo);
+
+    // SPIKE — diffraction cross. Fixed pixel size (sizeAttenuation:false)
+    // so it reads as a lens artifact, not a physical body. Faded as the
+    // core blooms past a few px; this is the visual that pops on far
+    // pinprick stars. Slightly larger for hot/blue spectral classes.
+    const spike = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: SPIKE_TEX,
+      color: 0xffffff,
+      sizeAttenuation: false,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      opacity: 0.55,
+    }));
+    spike.position.set(...s.position);
+    spike.renderOrder = 3;
+    spikeLayer.add(spike);
+
+    starLayers.set(s.id, { core, halo, spike });
+
+    // One real sphere per known planet. MeshLambertMaterial so the
+    // single roving systemLight gives a proper day/night terminator
+    // when you're parked next to the parent star.
+    for (const p of s.planets ?? []) {
+      const r = (PLANET_RADIUS_R_EARTH[p.kind] ?? 1) * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
+      const mat = new THREE.MeshLambertMaterial({
+        color: PLANET_COLOR[p.kind] ?? 0xaaaaaa,
+        fog: false,
+      });
+      const mesh = new THREE.Mesh(planetGeom, mat);
+      mesh.scale.setScalar(r);
+      mesh.renderOrder = 4;
+      mesh.visible = false;
+      scene.add(mesh);
+      const orbitAU = Math.max(0.005, p.orbitAU ?? 1);
+      planetMeshes.push({
+        mesh,
+        starId: s.id,
+        starName: s.name,
+        planetName: p.name,
+        planetKind: p.kind,
+        starPos: s.position,
+        orbitLy: orbitAU * LY_PER_AU,
+        phaseSeed: planetPhaseSeed(s.id, p.name),
+        // 0.05 / orbitAU rad/s ⇒ Earth ~2 minutes; capped so TRAPPIST-1's
+        // hot rocks don't blur into rings.
+        phaseSpeed: Math.min(0.5, 0.05 / orbitAU),
+        physicalR: r,
+      });
     }
   }
-}
-
-/** Set per-frame: which star sprite group is visible based on current speed. */
-function applyRenderMode(inWarp: boolean) {
-  warpStars.visible = inWarp;
-  impulseStars.visible = !inWarp;
 }
 
 /** Format an interstellar distance with units that read sensibly across
@@ -655,6 +809,94 @@ function tick() {
     if (closest === null || d < closest.dist) closest = { star: s, dist: d };
   }
 
+  // Update every planet's world position from its orbital phase. Hide
+  // planets whose star is far enough that the planet would subtend less
+  // than ~0.3 px — saves draw calls for the ~25 planets in the catalog.
+  const tNow = performance.now() / 1000;
+  const canvasH = canvas.clientHeight || 600;
+  // Minimum world-radius that subtends N px at distance d, given a 70°
+  // vertical FOV (tan(35°) ≈ 0.7). Used as a floor so distant stars stay
+  // visible without dominating the view.
+  const minRadiusForPx = (px: number, d: number) => (px * d * 0.7 * 2) / canvasH;
+  const minVisibleRadiusAt = (d: number) => minRadiusForPx(0.3, d);
+
+  // Per-frame three-layer star scaling. Core gets the min-pixel floor;
+  // halo follows core in world units but is hard-capped to a screen
+  // fraction so it can never balloon to full-viewport when you're
+  // sub-AU from a star (which would otherwise read as a giant white
+  // texture-quad behind the close-star sphere). Spike is in pixel units
+  // and fades as the core blooms past a few pixels.
+  // LOD note: when the catalog grows past ~100 stars this loop is the
+  // place to gate the halo + spike behind a visibility / distance test.
+  const STAR_MIN_PX = 1.5;
+  const HALO_RATIO = 7.0;             // halo radius = HALO_RATIO × core radius
+  const HALO_MAX_SCREEN_FRAC = 0.18;  // halo angular radius cap (NDC fraction)
+  const SPIKE_BASE_PX = 28;           // pixel-size of spike for a G dwarf core
+  for (const layers of starLayers.values()) {
+    const ud = layers.core.userData as { baseSize?: number };
+    const base = ud.baseSize ?? 0.06;
+    const sx = layers.core.position.x - ship.position.x;
+    const sy = layers.core.position.y - ship.position.y;
+    const sz = layers.core.position.z - ship.position.z;
+    const d = Math.hypot(sx, sy, sz);
+    const minR = minRadiusForPx(STAR_MIN_PX, d);
+    const coreR = Math.max(base, minR);
+    layers.core.scale.set(coreR, coreR, 1);
+    // World radius that subtends HALO_MAX_SCREEN_FRAC of the viewport
+    // height at this distance — the cap.
+    const haloMaxWorld = (HALO_MAX_SCREEN_FRAC * d * 1.4);
+    const haloR = Math.min(coreR * HALO_RATIO, haloMaxWorld);
+    layers.halo.scale.set(haloR, haloR, 1);
+    // Spike size: scale with spectral class (via base ratio), fixed pixels.
+    // sizeAttenuation:false sprite.scale ≈ NDC fraction; multiplying by 2
+    // gives full-screen-height units, so px / canvasH * 2 ≈ pixels.
+    const spikePx = SPIKE_BASE_PX * Math.sqrt(base / 0.08);
+    const spikeS = (spikePx * 2) / canvasH;
+    layers.spike.scale.set(spikeS, spikeS, 1);
+    // Fade spike as the core grows past floor — point sources twinkle,
+    // resolved discs do not.
+    const fade = Math.max(0, 1 - (coreR - minR) / (base * 4));
+    (layers.spike.material as THREE.SpriteMaterial).opacity = 0.55 * fade;
+    // Halo fades a touch when the core is sub-pixel-floor (we don't want
+    // a giant halo around a single-pixel pinprick at 50 ly).
+    const haloFade = Math.min(1, coreR / (base * 0.5));
+    (layers.halo.material as THREE.SpriteMaterial).opacity = 0.6 * haloFade;
+  }
+  // Planet update + currentPlanets[] build for the nearest-planets list.
+  // currentPlanets is populated only for planets orbiting the in-system
+  // star (we don't want stars-down-the-galaxy planets cluttering the
+  // panel). Min-pixel clamp on planet radius mirrors the close-star
+  // logic — even Earth at 10 AU is sub-pixel without it.
+  const inSystemStarId = closest && closest.dist < BRAKE_RANGE_LY ? closest.star.id : null;
+  const MIN_PLANET_PX = 3;
+  const live: LivePlanet[] = [];
+  for (const pm of planetMeshes) {
+    const phase = pm.phaseSeed + tNow * pm.phaseSpeed;
+    const px = pm.starPos[0] + Math.cos(phase) * pm.orbitLy;
+    const py = pm.starPos[1];
+    const pz = pm.starPos[2] + Math.sin(phase) * pm.orbitLy;
+    pm.mesh.position.set(px, py, pz);
+    const dx = px - ship.position.x;
+    const dy = py - ship.position.y;
+    const dz = pz - ship.position.z;
+    const dist = Math.hypot(dx, dy, dz);
+    const minR = (MIN_PLANET_PX * dist * 1.4) / canvasH;
+    const r = Math.max(pm.physicalR, minR);
+    pm.mesh.scale.setScalar(r);
+    pm.mesh.visible = r > minVisibleRadiusAt(dist);
+    if (pm.starId === inSystemStarId) {
+      live.push({
+        id: `${pm.starId}::${pm.planetName}`,
+        name: pm.planetName,
+        kind: pm.planetKind,
+        starName: pm.starName,
+        position: [px, py, pz],
+        distFromShip: dist,
+      });
+    }
+  }
+  currentPlanets = live;
+
   if (closest && closest.dist < BRAKE_RANGE_LY) {
     const distAu = closest.dist / LY_PER_AU;
     // Real radius for proper-scale rendering, BUT also clamp to a
@@ -667,7 +909,6 @@ function tick() {
     // tan(35°) ≈ 0.7, height in pixels from canvas; gives radius such
     // that the sphere subtends MIN_PX pixels.
     const MIN_PX = 4;
-    const canvasH = canvas.clientHeight || 600;
     const minRadiusLy = (MIN_PX * closest.dist * 1.4) / canvasH;
     const radiusLy = Math.max(trueRadiusLy, minRadiusLy);
     closeStarMesh.position.set(...closest.star.position);
@@ -676,68 +917,6 @@ function tick() {
       spectralColor(closest.star.spectralClass, closest.star.lumClass),
     );
     closeStarMesh.visible = closest.dist > trueRadiusLy;  // hide if camera is inside the star's actual photosphere
-
-    // Hide THIS star's planet-halo ring when in-system — at 10 AU from
-    // Sol the 0.5-ly ring is 3000× wider than the camera-to-star
-    // distance and looks like a yellow plane filling the viewport. Other
-    // stars' rings stay visible so the rest of the catalog still reads
-    // as "halos = has planets".
-    for (const ring of planetRings.children) {
-      const isHere = (ring.userData as { starId?: string } | undefined)?.starId === closest.star.id;
-      ring.visible = !isHere;
-    }
-
-    // Planets — render each at its real orbital distance (in AU), with a
-    // "demo cheat" radius scale so they're visible. Slow Kepler-ish phase
-    // animation: inner planets sweep visibly; outer planets crawl. Phase
-    // seeded by (starId, planetName) so each planet sits at a stable
-    // orbital position across reloads.
-    const planets = closest.star.planets ?? [];
-    const tNow = performance.now() / 1000;
-    const live: LivePlanet[] = [];   // built once and reused by updateHud
-    for (let i = 0; i < PLANET_POOL_SIZE; i++) {
-      const slot = planetPool[i];
-      if (i >= planets.length) {
-        if (slot.mesh.visible) slot.mesh.visible = false;
-        continue;
-      }
-      const p = planets[i];
-      const orbitAU = Math.max(0.005, p.orbitAU ?? 1);
-      const orbitLy = orbitAU * LY_PER_AU;
-      const phaseSeed = planetPhaseSeed(closest.star.id, p.name);
-      // 0.05 / orbitAU rad/s ⇒ Earth orbits in ~2 minutes; clamped to
-      // keep TRAPPIST-1 (orbits at 0.01 AU) from being a blur.
-      const phaseSpeed = Math.min(0.5, 0.05 / orbitAU);
-      const phase = phaseSeed + tNow * phaseSpeed;
-      const sx = closest.star.position[0] + Math.cos(phase) * orbitLy;
-      const sy = closest.star.position[1];                              // all planets on the star's local XZ plane
-      const sz = closest.star.position[2] + Math.sin(phase) * orbitLy;
-      // Same min-pixel-apparent-size trick we use on the close star:
-      // even an Earth-sized planet at 10 AU subtends ~0.5 px, which is
-      // invisible. Clamp to MIN_PLANET_PX so planets are always visible,
-      // letting actual scale dominate when you fly close.
-      const trueR = (PLANET_RADIUS_R_EARTH[p.kind] ?? 1) * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
-      const dxp = sx - ship.position.x;
-      const dyp = sy - ship.position.y;
-      const dzp = sz - ship.position.z;
-      const distFromCam = Math.hypot(dxp, dyp, dzp);
-      const MIN_PLANET_PX = 3;
-      const minR = (MIN_PLANET_PX * distFromCam * 1.4) / (canvas.clientHeight || 600);
-      const r = Math.max(trueR, minR);
-      slot.mesh.position.set(sx, sy, sz);
-      slot.mesh.scale.setScalar(r);
-      slot.mat.color.setHex(PLANET_COLOR[p.kind] ?? 0xaaaaaa);
-      slot.mesh.visible = true;
-      live.push({
-        id: `${closest.star.id}::${p.name}`,
-        name: p.name,
-        kind: p.kind,
-        starName: closest.star.name,
-        position: [sx, sy, sz],
-        distFromShip: distFromCam,
-      });
-    }
-    currentPlanets = live;
 
     // Autobrake — clamp throttle to a sub-warp value, and disengage
     // autopilot if it was steering us here. SNAP rather than smooth: the
@@ -763,12 +942,41 @@ function tick() {
     }
   } else {
     closeStarMesh.visible = false;
-    hidePlanetPool();
-    if (currentPlanets.length) currentPlanets = [];
-    // Out of any system — restore all halo rings.
-    for (const ring of planetRings.children) {
-      if (!ring.visible) ring.visible = true;
-    }
+  }
+
+  // Hide all three sprite layers for whichever star you're parked at —
+  // otherwise the halo, sized in world units, balloons to fill the
+  // entire viewport and reads as a giant bright square texture-quad
+  // sitting behind closeStarMesh. The trigger is being inside
+  // BRAKE_RANGE, NOT closeStarMesh.visible (which can be false if
+  // you've actually drifted inside the photosphere).
+  // (inSystemStarId is the same value we computed up by the planet loop
+  // for currentPlanets — recomputing here for clarity.)
+  const inSystemHideId = closest && closest.dist < BRAKE_RANGE_LY ? closest.star.id : null;
+  for (const [id, layers] of starLayers) {
+    const hide = id === inSystemHideId;
+    layers.core.visible = !hide;
+    layers.halo.visible = !hide;
+    layers.spike.visible = !hide;
+  }
+
+  // System light follows the closest star (only when within BRAKE_RANGE).
+  // Single roving PointLight is much cheaper than 21 statics, and it's
+  // the only one that ever has anything to illuminate (planets are
+  // hidden outside the system anyway). decay=0 because our world units
+  // are light-years; a physical inverse-square would either explode at
+  // sub-AU range or vanish at AU range.
+  if (closest && closest.dist < BRAKE_RANGE_LY) {
+    systemLight.position.set(...closest.star.position);
+    systemLight.color.setHex(spectralColor(closest.star.spectralClass, closest.star.lumClass));
+    // Scale intensity with R☉ so big stars actually feel hotter on planet
+    // surfaces; cap so a Betelgeuse cameo doesn't oversaturate.
+    const lum = Math.min(4, closest.star.radiusSolar ?? 1);
+    systemLight.intensity = 1.4 * lum;
+    systemLight.distance = BRAKE_RANGE_LY * 4;  // covers the full planet pool
+    systemLight.visible = true;
+  } else {
+    systemLight.visible = false;
   }
 
   const speed = Math.pow(ship.throttle, 3) * 0.4;
@@ -777,15 +985,12 @@ function tick() {
   camera.position.copy(ship.position);
   camera.lookAt(ship.position.clone().add(fwd));
 
-  // Mode flip — warp visuals (big sprites + shimmer) above ~0.5 throttle
-  // OR whenever autopilot is steering us somewhere. Below that we're in
-  // sublight "impulse," and the starfield should look like a real night sky.
+  // Warp overlay shimmer is purely cosmetic — no visual switch underneath.
   const inWarp = ship.warpEngaged || ship.throttle > 0.45;
-  applyRenderMode(inWarp);
   if (warpOverlayEl) warpOverlayEl.classList.toggle("active", inWarp);
 
   updateHud(fwd);
-  renderer.render(scene, camera);
+  composer.render();
   requestAnimationFrame(tick);
 }
 
@@ -932,8 +1137,11 @@ function resize() {
   const r = canvas.parentElement!.getBoundingClientRect();
   const w = Math.max(1, Math.floor(r.width));
   const h = Math.max(1, Math.floor(r.height));
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  const dpr = Math.min(window.devicePixelRatio, 2);
+  renderer.setPixelRatio(dpr);
   renderer.setSize(w, h, false);
+  composer.setPixelRatio(dpr);
+  composer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
 }
