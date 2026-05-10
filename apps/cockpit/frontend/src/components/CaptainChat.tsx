@@ -29,9 +29,20 @@ export function CaptainChat() {
     let cancelled = false;
     (async () => {
       try {
-        const result = await callTool("start_starship", { seed: 42, gameId: "demo" });
+        // Sticky playerId per (browser tab + gameId): persist in
+        // localStorage so a tab refresh reattaches to the same player
+        // server-side instead of spawning a fresh ghost. Combined with
+        // the server-side idle reaper, this fixes Liam's CLAUDE.md
+        // issue #4 (demo galaxy accumulates dead players).
+        const gameId = "demo";
+        const lsKey = `cockpit-player-id:${gameId}`;
+        const storedPlayerId = localStorage.getItem(lsKey) ?? undefined;
+        const result = await callTool("start_starship", {
+          seed: 42, gameId, playerId: storedPlayerId,
+        });
         const init = parseToolText<{ gameId: string; playerId: string }>(result);
         if (cancelled || !init) return;
+        if (init.playerId) localStorage.setItem(lsKey, init.playerId);
         bindWsPlayer(init.gameId, init.playerId);
         // Sequential, not Promise.all — three concurrent AppBridge.connect
         // calls on the same shared MCP Client race on shared notification
