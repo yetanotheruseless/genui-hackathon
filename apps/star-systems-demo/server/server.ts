@@ -206,8 +206,9 @@ type PublicMessage = { id: string; fromPlayerId: string; fromShipName: string; t
 type Galaxy = {
   gameId: string;
   seed: number;
-  /** Wall-clock timestamp of first creation (ms). Used by the lobby to
-   *  sort the games list and show "created N minutes ago". */
+  /** Wall-clock timestamp of first creation (ms). Used by the lobby
+   *  (apps/cockpit/frontend) to sort the games list and show
+   *  "created N minutes ago". */
   createdAt: number;
   players: Map<string, Player>;
   orbitals: Orbital[];
@@ -560,7 +561,6 @@ NO markdown fences. NO commentary outside the JSON.`;
 // ---------------------------------------------------------------------------
 
 const URI = {
-  lobby:      "ui://stars/lobby.html",
   cockpit:    "ui://stars/cockpit.html",
   compendium: "ui://stars/compendium.html",
   bridge:     "ui://stars/bridge.html",
@@ -569,7 +569,6 @@ const URI = {
 // Slot hint for MCP Apps hosts that support a fixed multi-pane layout
 // (e.g. apps/cockpit). Goose-desktop ignores this and renders inline.
 const SLOT = {
-  [URI.lobby]:      "viewport",
   [URI.cockpit]:    "viewport",
   [URI.compendium]: "side",
   [URI.bridge]:     "bottom",
@@ -602,7 +601,6 @@ function registerPaneResource(server: McpServer, name: string, uri: string, file
 export function createServer(): McpServer {
   const server = new McpServer({ name: "Culture Contact (MCP Apps)", version: "0.3.0" });
 
-  registerPaneResource(server, "Lobby",      URI.lobby,      "lobby.html");
   registerPaneResource(server, "Cockpit",    URI.cockpit,    "cockpit.html");
   registerPaneResource(server, "Compendium", URI.compendium, "compendium.html");
   registerPaneResource(server, "Bridge",     URI.bridge,     "bridge.html");
@@ -701,37 +699,18 @@ export function createServer(): McpServer {
     },
   );
 
-  registerAppTool(
-    server,
-    "open_lobby",
-    {
-      title: "Open the game lobby",
-      description:
-        "Show the lobby pane: list of existing galaxies (with player + orbital counts) and a " +
-        "form for joining or starting a new game with a chosen ship class and Mind. " +
-        "From the lobby, the player picks a galaxy and the lobby asks the LLM to call " +
-        "`start_starship` with the right gameId/mind_id/ship_class — which mounts the cockpit.",
-      inputSchema: {},
-      _meta: uiMeta(URI.lobby),
-    },
-    async () => ({
-      content: [{
-        type: "text",
-        text: JSON.stringify({ kind: "lobby_init" }),
-      }],
-    }),
-  );
-
-  registerAppTool(
-    server,
+  // Plain (non-UI) tool: consumed by the React lobby in apps/cockpit's
+  // frontend (and any LLM that wants to enumerate active galaxies). No
+  // pane is associated with it, so we register through the standard MCP
+  // path rather than registerAppTool's UI-coupled wrapper.
+  server.registerTool(
     "list_galaxies",
     {
       title: "List existing galaxies",
       description:
         "Return summaries of every active galaxy on this server: gameId, createdAt, " +
-        "player and orbital counts, and per-player ship name + Mind. Used by the lobby pane.",
+        "player and orbital counts, and per-player ship name + Mind.",
       inputSchema: {},
-      _meta: uiMeta(URI.lobby),
     },
     async () => {
       const list = [...galaxies.values()].map((g) => ({

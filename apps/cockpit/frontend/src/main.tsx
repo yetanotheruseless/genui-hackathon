@@ -1,4 +1,5 @@
 import { createRoot } from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
 import "./index.css";
 import App from "./App";
 
@@ -6,4 +7,8 @@ import App from "./App";
 // async bridge setup races with the cleanup of the first invocation,
 // leaving iframes without an init payload. Disabled for now — re-enable
 // once McpAppFrame is fully StrictMode-safe.
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <BrowserRouter>
+    <App />
+  </BrowserRouter>,
+);

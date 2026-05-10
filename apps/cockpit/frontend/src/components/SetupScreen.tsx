@@ -1,11 +1,15 @@
 /**
- * Pre-game vessel-selection screen. Shown when there's no playerId for
- * this gameId in localStorage (or after the user clicks "switch
- * vessel"). Lets the user pick a Mind, optionally browse the alternates,
- * and embark.
+ * Pre-game vessel-selection screen. Shown when:
+ *  - the user is creating a new galaxy (`/new` route), in which case
+ *    `gameId` is undefined and the server allocates a fresh one; or
+ *  - the user is joining an existing galaxy (`/game/:gameId` route)
+ *    that they don't have a player in yet.
  *
- * Once the player spawns, we persist their playerId in localStorage so a
- * tab refresh reattaches without showing this screen again.
+ * Once the player spawns, we persist their playerId in localStorage
+ * (per-gameId) so a tab refresh reattaches without showing this screen
+ * again. The `onSpawned` callback lets the parent route decide what to
+ * do next — `/new` navigates to `/game/<spawnedGameId>`, while
+ * `/game/:gameId` just lets the existing reattach effect take over.
  */
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -22,7 +26,14 @@ const SHIP_CLASS_HINT: Record<string, string> = {
   GOU: "General Offensive Unit · watchful warship",
 };
 
-export function SetupScreen({ gameId }: { gameId: string }) {
+type SetupScreenProps = {
+  /** Existing galaxy to join, or undefined to create a fresh one. */
+  gameId?: string;
+  /** Called after a successful spawn with the (possibly server-allocated) ids. */
+  onSpawned?: (gameId: string, playerId: string) => void;
+};
+
+export function SetupScreen({ gameId, onSpawned }: SetupScreenProps) {
   const [minds, setMinds] = useState<Mind[]>([]);
   const [loading, setLoading] = useState(true);
   const [picked, setPicked] = useState<string | null>(null);   // null = surprise me
@@ -49,25 +60,28 @@ export function SetupScreen({ gameId }: { gameId: string }) {
     setBusy(true);
     setErr(null);
     try {
-      const lsKey = `cockpit-player-id:${gameId}`;
       const result = await callTool("start_starship", {
         seed: Math.floor(Math.random() * 1_000_000),
-        gameId,
+        // Omit gameId entirely when creating new — server allocates one.
+        ...(gameId ? { gameId } : {}),
         ...(picked ? { mind_id: picked } : {}),
       });
       const init = parseToolText<{ gameId: string; playerId: string }>(result);
-      if (!init?.playerId) throw new Error("start_starship returned no playerId");
-      localStorage.setItem(lsKey, init.playerId);
+      if (!init?.playerId || !init.gameId) throw new Error("start_starship returned no ids");
+      // Persist per-gameId so multi-game players keep one identity per
+      // galaxy without colliding.
+      localStorage.setItem(`cockpit-player-id:${init.gameId}`, init.playerId);
       bindWsPlayer(init.gameId, init.playerId);
       // Sequential — three concurrent AppBridge.connect on the same MCP
       // client races on shared notification handler state.
       await callTool("open_compendium", { gameId: init.gameId, playerId: init.playerId });
       await callTool("open_bridge",     { gameId: init.gameId, playerId: init.playerId });
+      onSpawned?.(init.gameId, init.playerId);
     } catch (e) {
       setErr(String(e));
       setBusy(false);
     }
-    // Don't unset busy on success — App.tsx unmounts this screen.
+    // Don't unset busy on success — the parent route unmounts this screen.
   };
 
   return (
@@ -134,7 +148,7 @@ export function SetupScreen({ gameId }: { gameId: string }) {
 
           <div className="flex items-center justify-between">
             <div className="text-[10px] font-mono text-muted-foreground/60">
-              gameId · {gameId}
+              {gameId ? `gameId · ${gameId}` : "new galaxy · server will allocate id"}
             </div>
             <Button onClick={spawn} disabled={busy || loading}>
               {busy ? "spawning…" : "embark"}
