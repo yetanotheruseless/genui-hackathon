@@ -28,6 +28,7 @@ import {
   DefaultRenderingPipeline,
   Engine,
   HemisphericLight,
+  Matrix,
   Mesh,
   MeshBuilder,
   PointLight,
@@ -184,7 +185,14 @@ systemLight.range = BRAKE_RANGE_LY * 4;
 // Post-process pipeline. Replaces Three's EffectComposer +
 // UnrealBloomPass. Bloom threshold + weight tuned to roughly match
 // the prior Three look; will need re-tuning once sprite stacks land.
+//
+// IMPORTANT: disable imageProcessing.toneMappingEnabled — Babylon's
+// pipeline has tone mapping ON by default, which brightens "dark"
+// scenes (our near-black space background) into mid-gray. Three.js
+// never applied this. Off entirely keeps the clearColor honest.
 const pipeline = new DefaultRenderingPipeline("default", true, scene, [camera]);
+pipeline.imageProcessingEnabled = false;
+pipeline.fxaaEnabled = true;
 pipeline.bloomEnabled = true;
 pipeline.bloomThreshold = 0.78;
 pipeline.bloomWeight = 0.5;
@@ -446,6 +454,7 @@ let dragStart = { x: 0, y: 0 };
 let dragMoved = false;
 canvas.addEventListener("pointerdown", (e) => {
   dragging = true;
+  userHasInteracted = true;
   dragStart = { x: e.clientX, y: e.clientY };
   dragMoved = false;
   overlay.classList.add("hidden");
@@ -488,6 +497,7 @@ canvas.addEventListener("dblclick", (e) => {
 });
 
 throttleEl.addEventListener("input", () => {
+  userHasInteracted = true;
   const v = parseFloat(throttleEl.value);
   ship.throttle = v;
   if (ship.warpEngaged) ship.warpEngaged = false;
@@ -543,6 +553,14 @@ async function connectColyseus(shipName: string, shipClass: string) {
     $(room.state).players.onAdd((player: ServerPlayer, sessionId: string) => {
       if (sessionId === colyseusSessionId) {
         serverSelf = player;
+        // One-shot orientation nudge: if the server-side pitch is the
+        // default (~0, looking -Z into empty space from a spawn
+        // position 10 AU above Sol), bias the view down toward Sol.
+        // Skipped if the user has already interacted, so we don't
+        // yank a camera the player is actively driving.
+        if (!userHasInteracted && Math.abs(player.pitch) < 0.01) {
+          sendIntent({ pitchDelta: -Math.PI / 3 });
+        }
         return;
       }
       ensureOtherShipSprite(sessionId);
@@ -585,8 +603,21 @@ pane.initial.then((init) => {
   if (init.llm) hudLlm.textContent = `${init.llm.online ? "" : "offline · "}${init.llm.provider}/${init.llm.model}`;
   if (init.ship && hudShip) hudShip.textContent = init.ship.name;
   if (init.ship && hudMind) hudMind.textContent = init.ship.class;
+  // Spawn is ~10 AU "above" Sol (server.ts newPlayer puts you at
+  // [0, 1.58e-4, 0]). The default yaw=pitch=0 looks down -Z so you'd
+  // be staring at empty space with Sol below you. The actual pitch
+  // adjustment lives in the onAdd-for-self callback below, where we
+  // send a one-shot pitchDelta intent if the player hasn't yet
+  // interacted (so server + client end up agreeing on the view).
+  ship.pitch = -Math.PI / 3;
   void connectColyseus(init.ship?.name ?? "(unnamed)", init.ship?.class ?? "GCU");
 });
+
+/** Set true on first user pointer-down or throttle-input. Until then,
+ *  connectColyseus is free to nudge the camera (one-shot pitch toward
+ *  Sol on spawn). After interaction, the player owns their view and
+ *  we don't override it. */
+let userHasInteracted = false;
 
 // --- Render loop ---
 let last = performance.now();
@@ -719,13 +750,15 @@ function updateReticle() {
     return;
   }
   // Project world → NDC → pixels via Babylon's projection.
+  // Vector3.Project(point, worldMatrix, transformMatrix, viewport):
+  //   worldMatrix = identity (the point is already in world coords)
+  //   transformMatrix = scene's view × projection
   const w = engine.getRenderWidth();
   const h = engine.getRenderHeight();
-  const transformMat = scene.getTransformMatrix();
   const projected = Vector3.Project(
     tgtVec,
-    transformMat,
-    transformMat, // unused since we pass identity
+    Matrix.Identity(),
+    scene.getTransformMatrix(),
     new Viewport(0, 0, w, h),
   );
   // projected.x / projected.y are in screen-pixel space but at the
