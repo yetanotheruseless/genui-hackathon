@@ -38,10 +38,13 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { Server as ColyseusServer } from "colyseus";
+import { WebSocketTransport } from "@colyseus/ws-transport";
 import cors from "cors";
 import type { Request, Response } from "express";
 import { createServer, getGalaxies, hydrateGalaxy } from "./server.js";
 import { closePersistence, loadAllGalaxies, openPersistence, persistenceEnabled, snapshotAll } from "./persistence.js";
+import { StarRoom } from "./src/room.js";
 
 // Opt-in persistence: only active when PERSIST_DB env var is set.
 // Hydrate must complete before any transport accepts a request, or a
@@ -72,6 +75,16 @@ async function startHttp(create: () => McpServer): Promise<void> {
   const port = parseInt(process.env.PORT ?? "3030", 10);
   const app = createMcpExpressApp({ host: "0.0.0.0" });
   app.use(cors());
+
+  // Pass 2 smoke-test page — opens a Colyseus client connection,
+  // shows the authoritative state, lets you send input intents and
+  // engage warp without involving the cockpit iframe. Available at
+  // http://localhost:3030/smoke.
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+  app.get("/smoke", (_req: Request, res: Response) => {
+    res.sendFile(path.join(HERE, "smoke.html"));
+  });
+
   app.all("/mcp", async (req: Request, res: Response) => {
     const server = create();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -96,8 +109,23 @@ async function startHttp(create: () => McpServer): Promise<void> {
   const httpServer = app.listen(port, () => {
     console.log(`Star-Systems MCP Apps server listening on http://localhost:${port}/mcp`);
   });
+
+  // Pass 2: Colyseus runs on its own port (default 2567 via
+  // COLYSEUS_PORT). The ADR's single-port plan (sharing the Express
+  // listener) is fiddly with our existing @modelcontextprotocol/sdk
+  // server.on('request') chain — easier to use two ports for the MV
+  // and revisit consolidation later. Clients hit
+  // ws://localhost:${COLYSEUS_PORT} for state sync + input intents;
+  // MCP HTTP traffic continues on ${port}.
+  const colyseusPort = parseInt(process.env.COLYSEUS_PORT ?? "2567", 10);
+  const colyseus = new ColyseusServer({ transport: new WebSocketTransport() });
+  colyseus.define("star", StarRoom);
+  await colyseus.listen(colyseusPort);
+  console.log(`[colyseus] StarRoom listening on ws://localhost:${colyseusPort}`);
+
   const shutdown = () => {
     flushPersistence();
+    void colyseus.gracefullyShutdown(false).catch(() => {});
     httpServer.close(() => process.exit(0));
   };
   process.on("SIGINT", shutdown);

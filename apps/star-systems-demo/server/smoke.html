@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>StarRoom · smoke test</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #04060a; --line: #202a3d; --line-strong: #2a3a55;
+        --ink: #cfd6e6; --dim: #6f7689; --accent: #7ad7ff;
+        --warn: #ffb86b; --good: #88ffd9;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0; height: 100%; background: var(--bg);
+        color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+      }
+      body { display: grid; grid-template-columns: 320px 1fr; }
+      .col { padding: 12px; border-right: 1px solid var(--line); overflow-y: auto; }
+      .col + .col { border-right: none; }
+      h1 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.18em; color: var(--dim); margin: 0 0 8px 0; }
+      h2 { font-size: 10px; text-transform: uppercase; letter-spacing: 0.18em; color: var(--dim); margin: 16px 0 6px 0; }
+      .row { display: flex; gap: 6px; align-items: center; padding: 3px 0; }
+      label { display: block; color: var(--dim); margin-bottom: 2px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; }
+      input[type="text"], input[type="number"] {
+        background: rgba(0,0,0,0.3); border: 1px solid var(--line); color: var(--ink);
+        padding: 4px 6px; border-radius: 3px; font: inherit; font-size: 11px; flex: 1; min-width: 0;
+      }
+      input[type="range"] { width: 100%; accent-color: var(--accent); }
+      button {
+        background: rgba(122, 215, 255, 0.08); color: var(--accent);
+        border: 1px solid var(--accent); padding: 4px 10px; border-radius: 3px;
+        cursor: pointer; font: inherit; font-size: 11px;
+      }
+      button:hover { background: rgba(122, 215, 255, 0.18); }
+      button.warn { color: var(--warn); border-color: var(--warn); background: rgba(255,184,107,0.06); }
+      button.warn:hover { background: rgba(255,184,107,0.15); }
+      .pill {
+        display: inline-block; padding: 2px 6px; border: 1px solid var(--line);
+        border-radius: 3px; color: var(--dim); font-size: 10px;
+      }
+      .pill.good { color: var(--good); border-color: var(--good); }
+      .pill.bad { color: var(--warn); border-color: var(--warn); }
+      .v { color: var(--accent); }
+      pre {
+        background: rgba(0,0,0,0.3); border: 1px solid var(--line); padding: 8px;
+        border-radius: 3px; margin: 0; font-size: 10.5px; line-height: 1.4;
+        white-space: pre-wrap; word-break: break-all; max-height: 50vh; overflow-y: auto;
+      }
+      .controls { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+      .controls .full { grid-column: 1 / -1; }
+      .log {
+        font-size: 10px; line-height: 1.4; max-height: 30vh; overflow-y: auto;
+        background: rgba(0,0,0,0.3); border: 1px solid var(--line); padding: 6px; border-radius: 3px;
+      }
+      .log .row { padding: 1px 0; color: var(--dim); }
+      .log .row .t { color: var(--accent); }
+      kbd {
+        display: inline-block; padding: 1px 5px; border: 1px solid var(--line-strong);
+        border-radius: 2px; background: rgba(0,0,0,0.4); color: var(--ink);
+        font-size: 10px; min-width: 16px; text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="col">
+      <h1>StarRoom · smoke</h1>
+
+      <h2>Connection</h2>
+      <div class="row">
+        <label style="flex:1; margin:0">Endpoint</label>
+        <span class="pill" id="conn-status">disconnected</span>
+      </div>
+      <input type="text" id="endpoint" value="ws://localhost:2567" />
+      <div class="row" style="margin-top:6px">
+        <label style="flex:1; margin:0">gameId</label>
+        <input type="text" id="game-id" value="demo" style="flex:2" />
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label style="flex:1; margin:0">playerId</label>
+        <input type="text" id="player-id" value="smoke-1" style="flex:2" />
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label style="flex:1; margin:0">shipName</label>
+        <input type="text" id="ship-name" value="Smoke Tester" style="flex:2" />
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="connect">join</button>
+        <button id="disconnect" class="warn">leave</button>
+      </div>
+
+      <h2>Input intents</h2>
+      <p style="color:var(--dim); font-size:10px; margin: 4px 0 8px 0">
+        Throttle is sent on slider change. Yaw/pitch send a delta per
+        keydown of <kbd>A</kbd>/<kbd>D</kbd>/<kbd>W</kbd>/<kbd>S</kbd>
+        (focus the page; click here first).
+      </p>
+      <label>throttle <span class="v" id="throttle-readout">0.00</span></label>
+      <input type="range" id="throttle" min="0" max="1" step="0.01" value="0" />
+      <div class="controls">
+        <button id="yaw-left">A · yaw −</button>
+        <button id="yaw-right">D · yaw +</button>
+        <button id="pitch-up">W · pitch −</button>
+        <button id="pitch-down">S · pitch +</button>
+        <button id="zero-input" class="full warn">zero everything</button>
+      </div>
+
+      <h2>Warp</h2>
+      <div class="row">
+        <label style="flex:1; margin:0">target x,y,z (ly)</label>
+        <input type="text" id="warp-target" value="0.1,0,0.1" style="flex:2" />
+      </div>
+      <div class="controls">
+        <button id="warp-engage" class="full">warp_engage</button>
+        <button id="warp-stop" class="full warn">warp_stop</button>
+      </div>
+    </div>
+
+    <div class="col">
+      <h1>Authoritative state</h1>
+      <div class="row" style="gap:12px">
+        <span class="pill">tick <span class="v" id="hud-tick">—</span></span>
+        <span class="pill">gameId <span class="v" id="hud-game-id">—</span></span>
+        <span class="pill">players <span class="v" id="hud-pcount">0</span></span>
+        <span class="pill">sessionId <span class="v" id="hud-session">—</span></span>
+      </div>
+
+      <h2>Me</h2>
+      <pre id="me-dump">—</pre>
+
+      <h2>All players</h2>
+      <pre id="players-dump">—</pre>
+
+      <h2>Event log</h2>
+      <div class="log" id="event-log"></div>
+    </div>
+
+    <script type="module">
+      import { Client } from "https://unpkg.com/colyseus.js@0.16.22/dist/colyseus.js";
+
+      const $ = (id) => document.getElementById(id);
+      const log = (text, kind = "") => {
+        const row = document.createElement("div");
+        row.className = "row";
+        const t = new Date().toISOString().slice(11, 23);
+        row.innerHTML = `<span class="t">${t}</span> ${text}`;
+        $("event-log").prepend(row);
+      };
+
+      let client = null;
+      let room = null;
+
+      function setStatus(text, kind = "") {
+        const el = $("conn-status");
+        el.textContent = text;
+        el.classList.remove("good", "bad");
+        if (kind) el.classList.add(kind);
+      }
+
+      function dumpPlayer(p) {
+        return {
+          playerId: p.playerId,
+          shipName: p.shipName,
+          systemId: p.systemId,
+          pos: [+p.posX.toFixed(6), +p.posY.toFixed(6), +p.posZ.toFixed(6)],
+          yaw: +p.yaw.toFixed(4),
+          pitch: +p.pitch.toFixed(4),
+          throttle: +p.throttle.toFixed(3),
+          warpEngaged: p.warpEngaged,
+        };
+      }
+
+      function render() {
+        if (!room || !room.state) return;
+        $("hud-tick").textContent = room.state.tick;
+        $("hud-game-id").textContent = room.state.gameId;
+        $("hud-pcount").textContent = room.state.players.size;
+
+        const me = room.state.players.get(room.sessionId);
+        $("me-dump").textContent = me ? JSON.stringify(dumpPlayer(me), null, 2) : "—";
+
+        const all = {};
+        room.state.players.forEach((p, sid) => { all[sid] = dumpPlayer(p); });
+        $("players-dump").textContent = JSON.stringify(all, null, 2);
+      }
+
+      $("connect").addEventListener("click", async () => {
+        if (room) { log("already joined"); return; }
+        try {
+          setStatus("connecting…");
+          client = new Client($("endpoint").value);
+          room = await client.joinOrCreate("star", {
+            gameId: $("game-id").value,
+            playerId: $("player-id").value,
+            shipName: $("ship-name").value,
+            shipClass: "GCU",
+          });
+          $("hud-session").textContent = room.sessionId;
+          setStatus("connected", "good");
+          log(`joined room <span class="v">${room.roomId}</span> as <span class="v">${room.sessionId}</span>`);
+
+          // The 0.16+ state-sync callbacks API.
+          room.onStateChange((state) => render());
+          room.onLeave((code) => {
+            setStatus("disconnected", "bad");
+            log(`onLeave code=${code}`);
+            room = null;
+          });
+          room.onError((code, msg) => log(`onError ${code}: ${msg}`));
+        } catch (e) {
+          setStatus("failed", "bad");
+          log(`connect failed: ${e.message ?? e}`);
+        }
+      });
+
+      $("disconnect").addEventListener("click", () => {
+        if (!room) return;
+        room.leave();
+      });
+
+      // Throttle slider — send on input change.
+      $("throttle").addEventListener("input", (e) => {
+        const v = parseFloat(e.target.value);
+        $("throttle-readout").textContent = v.toFixed(2);
+        if (room) room.send("input", { throttle: v });
+      });
+
+      const YAW_STEP = 0.1;     // rad per press
+      const PITCH_STEP = 0.05;
+      function sendIntent(intent) {
+        if (!room) return;
+        room.send("input", intent);
+      }
+      $("yaw-left").addEventListener("click", () => sendIntent({ yawDelta: -YAW_STEP }));
+      $("yaw-right").addEventListener("click", () => sendIntent({ yawDelta:  YAW_STEP }));
+      $("pitch-up").addEventListener("click", () => sendIntent({ pitchDelta: -PITCH_STEP }));
+      $("pitch-down").addEventListener("click", () => sendIntent({ pitchDelta:  PITCH_STEP }));
+      $("zero-input").addEventListener("click", () => {
+        $("throttle").value = "0";
+        $("throttle-readout").textContent = "0.00";
+        if (room) room.send("input", { throttle: 0 });
+      });
+      window.addEventListener("keydown", (e) => {
+        if (e.target.tagName === "INPUT") return;
+        if (e.key === "a") sendIntent({ yawDelta: -YAW_STEP });
+        else if (e.key === "d") sendIntent({ yawDelta: YAW_STEP });
+        else if (e.key === "w") sendIntent({ pitchDelta: -PITCH_STEP });
+        else if (e.key === "s") sendIntent({ pitchDelta: PITCH_STEP });
+      });
+
+      $("warp-engage").addEventListener("click", () => {
+        if (!room) return;
+        const [x, y, z] = $("warp-target").value.split(",").map((s) => parseFloat(s.trim()));
+        if ([x, y, z].some((n) => !Number.isFinite(n))) {
+          log(`invalid target: ${$("warp-target").value}`);
+          return;
+        }
+        room.send("warp_engage", { targetId: `coord:${x},${y},${z}`, targetPos: [x, y, z], isOrbital: false });
+        log(`warp_engage → [${x}, ${y}, ${z}]`);
+      });
+      $("warp-stop").addEventListener("click", () => {
+        if (!room) return;
+        room.send("warp_stop", {});
+        log(`warp_stop`);
+      });
+    </script>
+  </body>
+</html>

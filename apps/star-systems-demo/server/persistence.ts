@@ -54,8 +54,40 @@ export function openPersistence(): void {
       json       TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS room_assignments (
+      game_id     TEXT PRIMARY KEY,
+      room_id     TEXT NOT NULL,
+      created_at  INTEGER NOT NULL
+    );
   `);
   console.log(`[persistence] opened ${p}`);
+}
+
+// --- room_assignments -----------------------------------------------
+// Maps each gameId to the live Colyseus roomId hosting it. Populated by
+// StarRoom.onCreate, cleared by onDispose. Pass 3 will read this from
+// MCP tool handlers via matchMaker.getLocalRoomById(roomId). Today's
+// 1:1 (gameId → roomId) is the early seam for future
+// (systemId → roomId) sharding.
+
+export function recordRoomAssignment(gameId: string, roomId: string): void {
+  if (!db) return;
+  db.prepare(
+    "INSERT INTO room_assignments (game_id, room_id, created_at) VALUES (?, ?, ?) " +
+    "ON CONFLICT(game_id) DO UPDATE SET room_id=excluded.room_id, created_at=excluded.created_at",
+  ).run(gameId, roomId, Date.now());
+}
+
+export function clearRoomAssignment(gameId: string): void {
+  if (!db) return;
+  db.prepare("DELETE FROM room_assignments WHERE game_id = ?").run(gameId);
+}
+
+export function getRoomIdForGame(gameId: string): string | null {
+  if (!db) return null;
+  const row = db.prepare("SELECT room_id FROM room_assignments WHERE game_id = ?")
+    .get(gameId) as { room_id: string } | undefined;
+  return row?.room_id ?? null;
 }
 
 /** Returns parsed galaxy snapshots ready to be reconstituted into the
