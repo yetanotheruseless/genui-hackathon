@@ -142,24 +142,26 @@
       tbody tr.target td.icon { position: relative; }
       tbody tr.target td.dist { position: relative; }
       /* Corner-bracket halves on the row's first + last cells. Two
-         pseudo-elements per side gives all 4 corners. */
+         pseudo-elements per side gives all 4 corners. Shorter than
+         half the row height so top + bottom brackets stay visibly
+         separated, and thin enough not to crowd the icon column. */
       tbody tr.target td.icon::before,
       tbody tr.target td.icon::after,
       tbody tr.target td.dist::before,
       tbody tr.target td.dist::after {
         content: "";
         position: absolute;
-        width: 8px;
-        height: 8px;
+        width: 5px;
+        height: 5px;
         border-color: var(--star);
         border-style: solid;
         border-width: 0;
         pointer-events: none;
       }
-      tbody tr.target td.icon::before { top: 2px;    left: 2px;    border-top-width:    2px; border-left-width:  2px; }
-      tbody tr.target td.icon::after  { bottom: 2px; left: 2px;    border-bottom-width: 2px; border-left-width:  2px; }
-      tbody tr.target td.dist::before { top: 2px;    right: 2px;   border-top-width:    2px; border-right-width: 2px; }
-      tbody tr.target td.dist::after  { bottom: 2px; right: 2px;   border-bottom-width: 2px; border-right-width: 2px; }
+      tbody tr.target td.icon::before { top: 1px;    left: 1px;    border-top-width:    1px; border-left-width:  1px; }
+      tbody tr.target td.icon::after  { bottom: 1px; left: 1px;    border-bottom-width: 1px; border-left-width:  1px; }
+      tbody tr.target td.dist::before { top: 1px;    right: 1px;   border-top-width:    1px; border-right-width: 1px; }
+      tbody tr.target td.dist::after  { bottom: 1px; right: 1px;   border-bottom-width: 1px; border-right-width: 1px; }
       tbody td {
         padding: 4px 8px;
         white-space: nowrap;
