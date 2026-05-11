@@ -43,7 +43,8 @@ import {
 
 import { Client as ColyseusClient, getStateCallbacks, type Room as ColyseusRoom } from "colyseus.js";
 import { callTool, poll, setupPaneApp } from "./shared.js";
-import type { Player as ServerPlayer, World as ServerWorld } from "../../../../packages/shared-state/src/index.js";
+import type { Player as ServerPlayer } from "./state-player.js";
+import type { World as ServerWorld } from "./state-world.js";
 import {
   BRAKE_RANGE_LY,
   EARTH_RADIUS_LY,
@@ -192,6 +193,37 @@ debugFillLight.diffuse = new Color3(1, 1, 1);
 debugFillLight.groundColor = new Color3(0.4, 0.4, 0.4);
 let debugFillLightOn = false;
 
+// Debug hook: expose engine/scene state to window so we can poke at
+// it from DevTools or via the claude-in-chrome MCP toolkit. Tagged
+// __cockpit so it's discoverable but doesn't pollute the global
+// namespace too aggressively.
+//
+// (window as unknown as { __cockpit?: unknown }).__cockpit = { ... }
+//   is the indirect-cast form to avoid a `@typescript-eslint/no-explicit-any`
+//   lint warning here; runtime-equivalent to `(window as any).__cockpit`.
+function exposeDebugState() {
+  const w = window as unknown as Record<string, unknown>;
+  w.__cockpit = {
+    engine,
+    scene,
+    camera,
+    debugFillLight,
+    get debugFillLightOn() { return debugFillLightOn; },
+    set debugFillLightOn(v: boolean) {
+      debugFillLightOn = v;
+      debugFillLight.intensity = v ? 1.5 : 0;
+    },
+    starMeshes,
+    planetMeshes,
+    otherShipSprites,
+    get ship() { return ship; },
+    get serverSelf() { return serverSelf; },
+    get colyseusRoom() { return colyseusRoom; },
+    get colyseusDebug() { return colyseusDebug.slice(); },
+    COLYSEUS_URL,
+  };
+}
+
 // Post-process pipeline. Replaces Three's EffectComposer +
 // UnrealBloomPass. Bloom threshold + weight tuned to roughly match
 // the prior Three look; will need re-tuning once sprite stacks land.
@@ -229,10 +261,16 @@ function buildStarMeshes() {
   for (const m of starMeshes.values()) m.dispose();
   starMeshes.clear();
   for (const s of stars) {
-    const radius = (s.radiusSolar ?? 1.0) * SOL_RADIUS_LY * STAR_VISUAL_SCALE;
+    // TODO(babylon): proper magnitude-based + log-depth scaling. For
+    // the migration MV we use a large fixed minimum visible radius so
+    // stars are visible from anywhere in the local neighborhood — once
+    // sprite stacks land we replace this with the real sizing math.
+    const trueRadius = (s.radiusSolar ?? 1.0) * SOL_RADIUS_LY * STAR_VISUAL_SCALE;
+    const debugMinRadius = 0.02; // ~12 AU; visible from a few hundred ly
+    const radius = Math.max(trueRadius, debugMinRadius);
     const mesh = MeshBuilder.CreateSphere(
       `star:${s.id}`,
-      { diameter: radius * 2, segments: 24 },
+      { diameter: radius * 2, segments: 16 },
       scene,
     );
     mesh.position.set(s.position[0], s.position[1], s.position[2]);
@@ -277,10 +315,15 @@ function buildPlanetMeshes() {
     for (const p of s.planets) {
       const orbitAU = p.orbitAU ?? 1;
       const radiusR = p.radiusEarths ?? PLANET_RADIUS_R_EARTH[p.kind] ?? 1;
-      const r = radiusR * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
+      const trueR = radiusR * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
+      // TODO(babylon): per-frame min-pixel sizing. For now planets get
+      // the same fixed min as stars but smaller (0.005 ly ≈ 3 AU) so
+      // they read as planet-sized next to their parent star.
+      const debugMinR = 0.005;
+      const r = Math.max(trueR, debugMinR);
       const mesh = MeshBuilder.CreateSphere(
         `planet:${s.id}::${p.name}`,
-        { diameter: r * 2, segments: 16 },
+        { diameter: r * 2, segments: 12 },
         scene,
       );
       const mat = new StandardMaterial(`planet:${s.id}::${p.name}:mat`, scene);
@@ -569,7 +612,25 @@ let serverSelf: ServerPlayer | null = null;
 let colyseusRoom: ColyseusRoom<ServerWorld> | null = null;
 let colyseusSessionId = "";
 
-const COLYSEUS_URL = `ws://${window.location.hostname}:${
+// Iframes mounted via srcdoc (the MCP-Apps host's default) have origin
+// "null" and empty location.hostname, so reading window.location.hostname
+// gives "" and produces a malformed "ws://:2567". Pull the hostname from
+// document.referrer (the parent page's URL) if location.hostname is
+// empty; if that's also empty (no referrer) fall back to localhost,
+// which is the right default for local dev. For non-localhost deployments
+// add ?colyseusHost=… to the iframe URL or wire the host through the
+// init payload.
+const colyseusHost = (() => {
+  const fromQuery = new URLSearchParams(window.location.search).get("colyseusHost");
+  if (fromQuery) return fromQuery;
+  if (window.location.hostname) return window.location.hostname;
+  try {
+    const ref = document.referrer;
+    if (ref) return new URL(ref).hostname || "localhost";
+  } catch {}
+  return "localhost";
+})();
+const COLYSEUS_URL = `ws://${colyseusHost}:${
   new URLSearchParams(window.location.search).get("colyseusPort") ?? "2567"
 }`;
 const RECON_TOKEN_KEY = (gid: string, rid: string) => `cockpit-recon-token:${gid}:${rid}`;
@@ -595,10 +656,21 @@ async function joinStarRoom(
   });
 }
 
+/** Debug breadcrumbs from connectColyseus + reconnect attempts. Read via
+ *  window.__cockpit.colyseusDebug in DevTools or the claude-in-chrome MCP. */
+const colyseusDebug: string[] = [];
+function cdb(msg: string) {
+  colyseusDebug.push(`${new Date().toISOString().slice(11, 23)}  ${msg}`);
+  console.log("[cockpit/colyseus]", msg);
+}
+
 async function connectColyseus(shipName: string, shipClass: string) {
+  cdb(`start — url=${COLYSEUS_URL}, gameId=${gameId}, playerId=${playerId}, ship=${shipName}/${shipClass}`);
   try {
     const client = new ColyseusClient(COLYSEUS_URL);
+    cdb(`Client constructed, calling joinStarRoom`);
     const room = await joinStarRoom(client, shipName, shipClass);
+    cdb(`joined room ${room.roomId} as ${room.sessionId}`);
     colyseusRoom = room;
     colyseusSessionId = room.sessionId;
     localStorage.setItem(`cockpit-last-room:${gameId}`, room.roomId);
@@ -639,6 +711,8 @@ async function connectColyseus(shipName: string, shipClass: string) {
     });
     room.onError((code, msg) => console.warn(`[colyseus] error ${code}: ${msg}`));
   } catch (e) {
+    const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    cdb(`FAILED: ${msg}`);
     console.warn("[cockpit] Colyseus connection failed (legacy path will engage):", e);
   }
 }
@@ -903,6 +977,7 @@ engine.runRenderLoop(() => {
   scene.render();
 });
 window.addEventListener("resize", () => engine.resize());
+exposeDebugState();
 
 // --- Server polling (unchanged from Three version) ---
 poll(200, async () => {

@@ -9,7 +9,7 @@
   "exports": {
     ".": "./src/index.ts"
   },
-  "dependencies": {
-    "@colyseus/schema": "^4.0.25"
+  "peerDependencies": {
+    "@colyseus/schema": "^3.0.0"
   }
 }

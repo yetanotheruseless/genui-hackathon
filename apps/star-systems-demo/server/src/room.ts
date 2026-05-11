@@ -22,7 +22,8 @@ import {
   speedFromThrottle,
   stepWarpAlignment,
 } from "../../../../packages/star-sim/src/index.js";
-import { Player, World } from "../../../../packages/shared-state/src/index.js";
+import { Player } from "./state-player.js";
+import { World } from "./state-world.js";
 import { clearRoomAssignment, recordRoomAssignment } from "../persistence.js";
 import { getGalaxies, STAR_INDEX } from "../server.js";
 
@@ -79,7 +80,7 @@ function findLegacyPlayer(gameId: string, playerId: string): LegacyPlayer | unde
   return galaxy.players.get(playerId) as LegacyPlayer | undefined;
 }
 
-export class StarRoom extends Room<{ state: World }> {
+export class StarRoom extends Room<World> {
   /** Per-session latest-input buffer. Replaced on each `input` message
    *  so the tick samples only the most recent intent. */
   private inputs = new Map<string, InputMsg>();
@@ -179,9 +180,22 @@ export class StarRoom extends Room<{ state: World }> {
     // next tick.
     const legacy = findLegacyPlayer(this.state.gameId, p.playerId);
     if (legacy) {
-      p.posX = legacy.position[0];
-      p.posY = legacy.position[1];
-      p.posZ = legacy.position[2];
+      // Some old persisted player records have position == [0,0,0]
+      // because older builds pushed the iframe's default ship position
+      // via sync_state and clobbered the spawn. (0,0,0) is Sol —
+      // camera would be inside the star. If we detect that, fall back
+      // to the standard spawn offset 10 AU above Sol.
+      const SPAWN_DEFAULT: [number, number, number] = [0, 1.58e-4, 0];
+      const atOrigin =
+        legacy.position[0] === 0 && legacy.position[1] === 0 && legacy.position[2] === 0;
+      const pos = atOrigin ? SPAWN_DEFAULT : legacy.position;
+      p.posX = pos[0];
+      p.posY = pos[1];
+      p.posZ = pos[2];
+      if (atOrigin) {
+        // Heal the legacy record so subsequent reads see the right spawn.
+        legacy.position = [...SPAWN_DEFAULT];
+      }
       // Legacy stores heading as a forward unit vector — convert back to
       // yaw/pitch (inverse of forwardFromYawPitch).
       const [hx, hy, hz] = legacy.heading;
@@ -210,7 +224,7 @@ export class StarRoom extends Room<{ state: World }> {
     console.log(`[StarRoom ${this.roomId}] join ${client.sessionId} (playerId=${p.playerId})`);
   }
 
-  override onLeave(client: Client, _code?: number) {
+  override onLeave(client: Client, _consented?: boolean) {
     this.state.players.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.warpTargets.delete(client.sessionId);
