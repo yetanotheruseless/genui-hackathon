@@ -182,6 +182,16 @@ const systemLight = new PointLight("sun", new Vector3(0, 0, 0), scene);
 systemLight.intensity = 0;
 systemLight.range = BRAKE_RANGE_LY * 4;
 
+// Debug fill light — bright full-scene ambient, off by default. Toggle
+// with L. Useful when you can't see anything because you're far from
+// a star light and want to verify scene contents exist. Mirrors the
+// debug fill from the Three port.
+const debugFillLight = new HemisphericLight("debug", new Vector3(0, 1, 0), scene);
+debugFillLight.intensity = 0;
+debugFillLight.diffuse = new Color3(1, 1, 1);
+debugFillLight.groundColor = new Color3(0.4, 0.4, 0.4);
+let debugFillLightOn = false;
+
 // Post-process pipeline. Replaces Three's EffectComposer +
 // UnrealBloomPass. Bloom threshold + weight tuned to roughly match
 // the prior Three look; will need re-tuning once sprite stacks land.
@@ -509,6 +519,51 @@ warpBtn.addEventListener("click", () => {
   }
 });
 
+// Arrow keys for camera look-around. Both keydown/keyup flag-based
+// (smooth continuous rotation while held) AND key-repeat-friendly
+// (each browser-emitted repeat keydown also nudges, so a quick tap
+// works too). Designed to be friendly to keyboard-automation tools.
+const arrowKeys = { up: false, down: false, left: false, right: false };
+
+window.addEventListener("keydown", (e) => {
+  const tag = (e.target as HTMLElement | null)?.tagName;
+  // Don't steal arrows from form inputs (the throttle slider would
+  // otherwise have its built-in arrow nudge fight us).
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if (e.key === "ArrowUp")    { arrowKeys.up = true;    userHasInteracted = true; e.preventDefault(); }
+  if (e.key === "ArrowDown")  { arrowKeys.down = true;  userHasInteracted = true; e.preventDefault(); }
+  if (e.key === "ArrowLeft")  { arrowKeys.left = true;  userHasInteracted = true; e.preventDefault(); }
+  if (e.key === "ArrowRight") { arrowKeys.right = true; userHasInteracted = true; e.preventDefault(); }
+  // L toggles a bright fill light so you can see what you're flying
+  // through (ported from the Three-side debug toggle).
+  if (e.key === "l" || e.key === "L") {
+    debugFillLightOn = !debugFillLightOn;
+    debugFillLight.intensity = debugFillLightOn ? 1.5 : 0;
+  }
+});
+window.addEventListener("keyup", (e) => {
+  if (e.key === "ArrowUp")    arrowKeys.up = false;
+  if (e.key === "ArrowDown")  arrowKeys.down = false;
+  if (e.key === "ArrowLeft")  arrowKeys.left = false;
+  if (e.key === "ArrowRight") arrowKeys.right = false;
+});
+
+/** Per-tick: integrate arrow-key rotation rates and ship them as
+ *  input intents alongside the mouse-drag path. */
+function applyArrowKeyLook(dt: number) {
+  const RATE = 1.5; // rad/sec — comparable to a brisk mouse drag
+  let yawDelta = 0;
+  let pitchDelta = 0;
+  if (arrowKeys.left)  yawDelta   -= RATE * dt;
+  if (arrowKeys.right) yawDelta   += RATE * dt;
+  if (arrowKeys.up)    pitchDelta += RATE * dt;
+  if (arrowKeys.down)  pitchDelta -= RATE * dt;
+  if (yawDelta === 0 && pitchDelta === 0) return;
+  ship.yaw += yawDelta;
+  ship.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, ship.pitch + pitchDelta));
+  sendIntent({ yawDelta, pitchDelta });
+}
+
 // --- Colyseus connection (verbatim from Three version) ---
 let serverSelf: ServerPlayer | null = null;
 let colyseusRoom: ColyseusRoom<ServerWorld> | null = null;
@@ -625,6 +680,10 @@ function tick() {
   const now = performance.now();
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
+
+  // Arrow-key look-around — applied BEFORE we compute the forward
+  // vector so this tick's render reflects the new orientation.
+  applyArrowKeyLook(dt);
 
   // Forward vector from yaw/pitch in right-handed coords (matches the
   // Three convention since scene.useRightHandedSystem = true).
