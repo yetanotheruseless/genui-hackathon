@@ -144,6 +144,13 @@ const ship = {
 };
 let lastSyncedTargetId: string | null = null;
 let lastArrivedTargetId: string | null = null;
+/** Highest faceRequestTs we've acted on. Server bumps it whenever the
+ *  face_target tool fires; on each new value we lerp the camera to
+ *  face ship.targetId. */
+let lastFaceRequestTs = 0;
+/** Highest stopRequestTs we've acted on. Server bumps it on
+ *  stop_engines; on each new value we zero throttle locally. */
+let lastStopRequestTs = 0;
 
 // --- Babylon engine + scene ---
 const engine = new Engine(canvas, true, {
@@ -261,16 +268,14 @@ function buildStarMeshes() {
   for (const m of starMeshes.values()) m.dispose();
   starMeshes.clear();
   for (const s of stars) {
-    // TODO(babylon): proper magnitude-based + log-depth scaling. For
-    // the migration MV we use a large fixed minimum visible radius so
-    // stars are visible from anywhere in the local neighborhood — once
-    // sprite stacks land we replace this with the real sizing math.
+    // True-scale (200× cheat from Three). Sol ≈ 0.93 AU radius.
+    // Per-frame scaleStarsAndPlanetsByPixelSize() inflates this each
+    // tick so distant stars stay above a minimum pixel size — without
+    // that, anything beyond a few AU is sub-pixel.
     const trueRadius = (s.radiusSolar ?? 1.0) * SOL_RADIUS_LY * STAR_VISUAL_SCALE;
-    const debugMinRadius = 0.02; // ~12 AU; visible from a few hundred ly
-    const radius = Math.max(trueRadius, debugMinRadius);
     const mesh = MeshBuilder.CreateSphere(
       `star:${s.id}`,
-      { diameter: radius * 2, segments: 16 },
+      { diameter: trueRadius * 2, segments: 16 },
       scene,
     );
     mesh.position.set(s.position[0], s.position[1], s.position[2]);
@@ -280,8 +285,44 @@ function buildStarMeshes() {
     mesh.material = mat;
     mesh.parent = starGroup;
     mesh.isPickable = true;
-    mesh.metadata = { kind: "star", starId: s.id };
+    mesh.metadata = { kind: "star", starId: s.id, trueRadius };
     starMeshes.set(s.id, mesh);
+  }
+}
+
+/** Per-frame scale-up so distant bodies don't disappear below a few
+ *  pixels. Approximates the Three pixel-stable sprite behavior using
+ *  per-frame mesh.scaling. Capped so close-up bodies render at true
+ *  scale, not the inflated debug scale. Used until we port the
+ *  proper magnitude-based sprite-stack system. */
+const STAR_MIN_PX = 4;
+const PLANET_MIN_PX = 2;
+function scaleStarsAndPlanetsByPixelSize() {
+  const canvasH = engine.getRenderHeight() || 600;
+  const fov = camera.fov;
+  // Pixels = (angularDiameter / fov) * canvasH = (2r / d / fov) * canvasH
+  // We want: max(1, minPx / projectedPx)
+  const minScaleFor = (trueR: number, distance: number, minPx: number): number => {
+    if (distance <= 0) return 1;
+    const projectedPx = ((2 * trueR) / distance / fov) * canvasH;
+    if (projectedPx >= minPx) return 1;
+    return minPx / projectedPx;
+  };
+  // Scratch vector to avoid allocations in the loop.
+  const camPos = camera.position;
+  for (const mesh of starMeshes.values()) {
+    const md = mesh.metadata as { trueRadius?: number } | undefined;
+    const r = md?.trueRadius ?? 1e-7;
+    const d = Vector3.Distance(mesh.position, camPos);
+    const s = minScaleFor(r, d, STAR_MIN_PX);
+    mesh.scaling.setAll(s);
+  }
+  for (const pm of planetMeshes) {
+    const md = pm.mesh.metadata as { trueRadius?: number } | undefined;
+    const r = md?.trueRadius ?? 1e-9;
+    const d = Vector3.Distance(pm.mesh.position, camPos);
+    const s = minScaleFor(r, d, PLANET_MIN_PX);
+    pm.mesh.scaling.setAll(s);
   }
 }
 
@@ -315,12 +356,11 @@ function buildPlanetMeshes() {
     for (const p of s.planets) {
       const orbitAU = p.orbitAU ?? 1;
       const radiusR = p.radiusEarths ?? PLANET_RADIUS_R_EARTH[p.kind] ?? 1;
-      const trueR = radiusR * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
-      // TODO(babylon): per-frame min-pixel sizing. For now planets get
-      // the same fixed min as stars but smaller (0.005 ly ≈ 3 AU) so
-      // they read as planet-sized next to their parent star.
-      const debugMinR = 0.005;
-      const r = Math.max(trueR, debugMinR);
+      // True scale (200× cheat) — Earth at 1 R⊕ × 200 ≈ 0.0086 AU
+      // radius. Visible from within ~1 AU; invisible at warp range.
+      // TODO(babylon): per-frame min-pixel sizing so distant planets
+      // remain visible as pickable specks.
+      const r = radiusR * EARTH_RADIUS_LY * PLANET_VISUAL_SCALE;
       const mesh = MeshBuilder.CreateSphere(
         `planet:${s.id}::${p.name}`,
         { diameter: r * 2, segments: 12 },
@@ -333,7 +373,7 @@ function buildPlanetMeshes() {
       mesh.material = mat;
       mesh.parent = planetGroup;
       mesh.isPickable = true;
-      mesh.metadata = { kind: "planet", starId: s.id, planetName: p.name };
+      mesh.metadata = { kind: "planet", starId: s.id, planetName: p.name, trueRadius: r };
       planetMeshes.push({
         mesh,
         starId: s.id,
@@ -842,6 +882,11 @@ function tick() {
   const inWarp = ship.warpEngaged || ship.throttle > 0.45;
   if (warpOverlayEl) warpOverlayEl.classList.toggle("active", inWarp);
 
+  // Per-frame pixel-stable sizing so stars/planets remain visible
+  // from any distance (replacement for Three's sprite stack until
+  // we port that properly).
+  scaleStarsAndPlanetsByPixelSize();
+
   // HUD + reticle + other-ship interpolation
   updateHud();
   updateReticle();
@@ -1023,6 +1068,40 @@ poll(200, async () => {
     if (state.warpEngaged !== ship.warpEngaged && !colyseusRoom) {
       ship.warpEngaged = state.warpEngaged;
     }
+  }
+  // face_target one-shot. Server sets faceRequestTs = Date.now() when
+  // the MCP face_target tool fires; whenever we see a fresh ts we
+  // compute the yaw/pitch needed to look at the locked target and
+  // send that as a delta via the input intent stream so the server
+  // (and other clients) see the rotation, AND apply it locally for
+  // instant feedback. Without this, the Align button is silent.
+  if (state?.faceRequestTs && state.faceRequestTs > lastFaceRequestTs) {
+    lastFaceRequestTs = state.faceRequestTs;
+    const tgt = resolveTargetPosition(ship.targetId);
+    if (tgt) {
+      const dx = tgt.pos[0] - ship.position.x;
+      const dy = tgt.pos[1] - ship.position.y;
+      const dz = tgt.pos[2] - ship.position.z;
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const nx = dx / len, ny = dy / len, nz = dz / len;
+      const wantYaw = Math.atan2(nx, -nz);
+      const wantPitch = Math.asin(Math.max(-1, Math.min(1, ny)));
+      const yawDelta = wantYaw - ship.yaw;
+      const pitchDelta = wantPitch - ship.pitch;
+      ship.yaw = wantYaw;
+      ship.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, wantPitch));
+      userHasInteracted = true;
+      sendIntent({ yawDelta, pitchDelta });
+    }
+  }
+  // stop_engines one-shot — server clears warpEngaged + sets
+  // stopRequestTs; we mirror locally so warp-overlay/reticle status
+  // clears immediately without waiting for the next Colyseus patch.
+  if (state?.stopRequestTs && state.stopRequestTs > lastStopRequestTs) {
+    lastStopRequestTs = state.stopRequestTs;
+    ship.warpEngaged = false;
+    ship.throttle = 0;
+    throttleEl.value = "0";
   }
   // Legacy nearbyPlayers path: only fires when Colyseus is offline so
   // the per-sessionId Colyseus sprites and the legacy ones don't double up.
