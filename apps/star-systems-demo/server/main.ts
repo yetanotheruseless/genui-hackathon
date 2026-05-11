@@ -34,6 +34,11 @@ import { fileURLToPath } from "node:url";
   }
 }
 
+// Rapier needs a tiny shim before importing — it expects browser globals.
+// Node 20.20+ has performance/atob natively; just `self` is missing.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(globalThis as any).self ??= globalThis;
+
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -42,6 +47,7 @@ import { Server as ColyseusServer } from "colyseus";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import cors from "cors";
 import type { Request, Response } from "express";
+import RAPIER from "@dimforge/rapier3d-deterministic-compat";
 import { createServer, getGalaxies, hydrateGalaxy } from "./server.js";
 import { closePersistence, loadAllGalaxies, openPersistence, persistenceEnabled, snapshotAll } from "./persistence.js";
 import { StarRoom } from "./src/room.js";
@@ -118,6 +124,14 @@ async function startHttp(create: () => McpServer): Promise<void> {
   // ws://localhost:${COLYSEUS_PORT} for state sync + input intents;
   // MCP HTTP traffic continues on ${port}.
   const colyseusPort = parseInt(process.env.COLYSEUS_PORT ?? "2567", 10);
+
+  // Pass 4: Rapier server-side. The WASM is base64-embedded in the
+  // -compat build; init is idempotent and resolves once the module
+  // is ready. Must complete before StarRoom.onCreate runs, since the
+  // Room constructs a RAPIER.World there.
+  await RAPIER.init();
+  console.log("[rapier] deterministic build initialized");
+
   const colyseus = new ColyseusServer({ transport: new WebSocketTransport() });
   colyseus.define("star", StarRoom);
   await colyseus.listen(colyseusPort);

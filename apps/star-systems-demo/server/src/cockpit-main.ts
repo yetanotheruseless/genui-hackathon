@@ -1188,12 +1188,27 @@ async function connectColyseus(shipName: string, shipClass: string) {
 }
 
 // --- other-ship rendering via Colyseus -----------------------------
-// Per-sessionId sprite kept across snapshots so we don't rebuild every
-// patch. Map sessionId → sprite + last-known target position. Per
-// render frame we lerp the sprite toward the target.
+// Pass 4: snapshot interpolation buffer. Per render frame we lerp the
+// sprite between the two snapshots that bracket `now - RENDER_DELAY_MS`,
+// instead of single-snapshot lerp toward the latest. This eliminates
+// the visible stutter on 20 Hz patch input.
+//
+// Source-engine pattern: stay rendering ~100 ms behind realtime so we
+// always have two known endpoints to interpolate between. Cost: other
+// ships visually lag realtime by RENDER_DELAY_MS. Benefit: smooth.
+//
+// We never extrapolate past the newest snapshot (just hold position)
+// — extrapolation is brittle when the server pauses or the WS hiccups,
+// and ships frequently change throttle, so a tiny pause looks better
+// than a wrong predicted motion that snap-corrects on the next sample.
+const RENDER_DELAY_MS = 100;
+const SNAPSHOT_BUFFER_SIZE = 8;
+
+type ShipSnapshot = { t: number; x: number; y: number; z: number };
+
 const otherShipSprites = new Map<string, {
   sprite: THREE.Sprite;
-  target: { x: number; y: number; z: number };
+  snapshots: ShipSnapshot[];
 }>();
 
 function ensureOtherShipSprite(sessionId: string) {
@@ -1203,15 +1218,15 @@ function ensureOtherShipSprite(sessionId: string) {
   }));
   sprite.scale.set(0.008, 0.008, 1);
   otherShipsGroup.add(sprite);
-  otherShipSprites.set(sessionId, { sprite, target: { x: 0, y: 0, z: 0 } });
+  otherShipSprites.set(sessionId, { sprite, snapshots: [] });
 }
 
 function applyOtherShipUpdate(sessionId: string, p: ServerPlayer) {
   const entry = otherShipSprites.get(sessionId);
   if (!entry) return;
-  entry.target.x = p.posX;
-  entry.target.y = p.posY;
-  entry.target.z = p.posZ;
+  const snap: ShipSnapshot = { t: performance.now(), x: p.posX, y: p.posY, z: p.posZ };
+  entry.snapshots.push(snap);
+  if (entry.snapshots.length > SNAPSHOT_BUFFER_SIZE) entry.snapshots.shift();
   // Keep the playerId → position map fresh so ship: targets resolve
   // against the live position. The schema's playerId is our stable
   // cross-room identity used by overview-main as the row id.
@@ -1235,16 +1250,46 @@ function removeOtherShipSprite(sessionId: string) {
   // legacy nearbyPlayers fallback overwrite them on the next poll.
 }
 
-/** Called from the render loop. Lerps each other-ship sprite toward
- *  its latched server target (single-snapshot lerp, the realtime-
- *  tanks-demo pattern). */
+/** Called from the render loop. For each other ship: find the two
+ *  snapshots that bracket `now - RENDER_DELAY_MS` and lerp between
+ *  them. If we only have one snapshot (warm-up) we snap to it.
+ *  If renderTime exceeds the newest snapshot (the source paused),
+ *  hold at the newest rather than extrapolate. */
 function tickOtherShipsFromColyseus() {
   if (otherShipSprites.size === 0) return;
-  const k = 0.2;
-  for (const { sprite, target } of otherShipSprites.values()) {
-    sprite.position.x = THREE.MathUtils.lerp(sprite.position.x, target.x, k);
-    sprite.position.y = THREE.MathUtils.lerp(sprite.position.y, target.y, k);
-    sprite.position.z = THREE.MathUtils.lerp(sprite.position.z, target.z, k);
+  const renderTime = performance.now() - RENDER_DELAY_MS;
+  for (const entry of otherShipSprites.values()) {
+    const snaps = entry.snapshots;
+    if (snaps.length === 0) continue;
+    if (snaps.length === 1) {
+      entry.sprite.position.set(snaps[0].x, snaps[0].y, snaps[0].z);
+      continue;
+    }
+    // Newest first to scan back for the bracketing pair (typical case
+    // is the most-recent two snapshots — short loop).
+    let a: ShipSnapshot | null = null;
+    let b: ShipSnapshot | null = null;
+    for (let i = snaps.length - 1; i >= 1; i--) {
+      if (snaps[i - 1].t <= renderTime && snaps[i].t >= renderTime) {
+        a = snaps[i - 1];
+        b = snaps[i];
+        break;
+      }
+    }
+    if (a && b) {
+      const span = b.t - a.t;
+      const alpha = span > 0 ? (renderTime - a.t) / span : 0;
+      entry.sprite.position.x = a.x + (b.x - a.x) * alpha;
+      entry.sprite.position.y = a.y + (b.y - a.y) * alpha;
+      entry.sprite.position.z = a.z + (b.z - a.z) * alpha;
+    } else if (renderTime < snaps[0].t) {
+      // Render time is before the oldest snapshot — hold at oldest.
+      entry.sprite.position.set(snaps[0].x, snaps[0].y, snaps[0].z);
+    } else {
+      // renderTime > newest — hold at newest (don't extrapolate).
+      const newest = snaps[snaps.length - 1];
+      entry.sprite.position.set(newest.x, newest.y, newest.z);
+    }
   }
 }
 
@@ -1338,7 +1383,13 @@ function tick() {
   // already sent as intents and will land in the NEXT server snapshot,
   // but until then we keep the local optimistic values).
   if (colyseusRoom && serverSelf) {
-    const k = 0.35;
+    // Pass 4: tighter own-ship lerp (was 0.35 — visibly trailing).
+    // Our ship doesn't use the interpolation buffer because we don't
+    // want render delay on our own motion; the server position is the
+    // freshest authoritative thing we have. 0.55 catches up over ~3
+    // render frames at 60 Hz, fast enough that throttle changes feel
+    // responsive without snapping hard on every patch.
+    const k = 0.55;
     ship.position.x = THREE.MathUtils.lerp(ship.position.x, serverSelf.posX, k);
     ship.position.y = THREE.MathUtils.lerp(ship.position.y, serverSelf.posY, k);
     ship.position.z = THREE.MathUtils.lerp(ship.position.z, serverSelf.posZ, k);

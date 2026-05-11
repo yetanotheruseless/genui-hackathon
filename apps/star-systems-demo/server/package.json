@@ -21,6 +21,7 @@
     "@ai-sdk/openai": "^1.0.0",
     "@colyseus/schema": "^4.0.25",
     "@colyseus/ws-transport": "^0.17.13",
+    "@dimforge/rapier3d-deterministic-compat": "^0.19.3",
     "@modelcontextprotocol/ext-apps": "^1.0.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "ai": "^4.3.16",

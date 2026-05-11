@@ -17,6 +17,7 @@
  *  - No reconnection token plumbing yet (Pass 3).
  */
 import { Client, Room } from "colyseus";
+import RAPIER from "@dimforge/rapier3d-deterministic-compat";
 import {
   speedFromThrottle,
   stepWarpAlignment,
@@ -24,6 +25,12 @@ import {
 import { Player, World } from "../../../../packages/shared-state/src/index.js";
 import { clearRoomAssignment, recordRoomAssignment } from "../persistence.js";
 import { getGalaxies, STAR_INDEX } from "../server.js";
+
+/** Capsule radius approximating a Culture vessel hull for the Rapier
+ *  body. Tiny in ly so it doesn't interact with the existing arrival
+ *  ranges. Pass 5 will dial these in once we add real collidables
+ *  (asteroids, projectiles). */
+const SHIP_BODY_RADIUS_LY = 1e-7;
 
 // Pass 2 doesn't read the legacy galaxy record yet; it just holds its
 // own state. Pass 3 will hydrate from getGalaxy(gameId) on onCreate.
@@ -85,12 +92,31 @@ export class StarRoom extends Room<{ state: World }> {
     { targetId: string; targetPos: [number, number, number]; isOrbital: boolean }
   >();
 
+  /** Pass 4: Rapier physics world. Zero-gravity (we're in space). Holds
+   *  kinematic bodies for each ship — their positions are SET each
+   *  tick from our integrated state so Rapier knows where every ship
+   *  is. Pass 5 will add real collidables (asteroids, projectiles)
+   *  and start using the world's collision events / shape queries. */
+  private rapier!: RAPIER.World;
+
+  /** Per-session ship body in the Rapier world. Created in onJoin,
+   *  removed in onLeave. Position is kept in sync with the Schema's
+   *  posX/Y/Z each tick. */
+  private rapierBodies = new Map<string, RAPIER.RigidBody>();
+
   override onCreate(options: { gameId?: string }) {
     const gameId = options.gameId ?? "demo";
     this.state = new World();
     this.state.gameId = gameId;
     this.setPatchRate(TICK_MS);
     this.setSimulationInterval((dtMs) => this.tick(dtMs / 1000), TICK_MS);
+
+    // Zero-gravity world. RAPIER.init() must have completed by now
+    // (main.ts awaits it before defining/listening). Timestep is set
+    // to match our tick so Rapier's substep budget aligns with the
+    // game tick.
+    this.rapier = new RAPIER.World({ x: 0, y: 0, z: 0 });
+    this.rapier.timestep = TICK_MS / 1000;
 
     // Input intent stream. Absolute fields (throttle) are latest-wins;
     // delta fields (yawDelta / pitchDelta) accumulate between ticks so
@@ -167,6 +193,20 @@ export class StarRoom extends Room<{ state: World }> {
       p.dockedOrbitalId = legacy.dockedOrbitalId ?? "";
     }
     this.state.players.set(client.sessionId, p);
+
+    // Pass 4: create the Rapier body for this ship. Kinematic
+    // position-based body — we set its translation each tick from our
+    // integrated position rather than letting Rapier sim it. This
+    // makes Rapier a passive observer for now; Pass 5 will add real
+    // collidables it can interact with.
+    const bodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
+      .setTranslation(p.posX, p.posY, p.posZ);
+    const body = this.rapier.createRigidBody(bodyDesc);
+    const colliderDesc = RAPIER.ColliderDesc.ball(SHIP_BODY_RADIUS_LY)
+      .setSensor(true); // no contact response yet — just presence
+    this.rapier.createCollider(colliderDesc, body);
+    this.rapierBodies.set(client.sessionId, body);
+
     console.log(`[StarRoom ${this.roomId}] join ${client.sessionId} (playerId=${p.playerId})`);
   }
 
@@ -174,11 +214,19 @@ export class StarRoom extends Room<{ state: World }> {
     this.state.players.delete(client.sessionId);
     this.inputs.delete(client.sessionId);
     this.warpTargets.delete(client.sessionId);
+    const body = this.rapierBodies.get(client.sessionId);
+    if (body) {
+      this.rapier.removeRigidBody(body);
+      this.rapierBodies.delete(client.sessionId);
+    }
     console.log(`[StarRoom ${this.roomId}] leave ${client.sessionId}`);
   }
 
   override onDispose() {
     clearRoomAssignment(this.state.gameId);
+    // Free the Rapier world's WASM-backed storage. Without this, every
+    // disposed room leaks the WASM-side state.
+    this.rapier.free();
     console.log(`[StarRoom ${this.roomId}] dispose`);
   }
 
@@ -293,7 +341,17 @@ export class StarRoom extends Room<{ state: World }> {
         // (Exception: arrival above clears legacy.warpEngaged so the
         // iframe's poll sees the new state on its next 200 ms cycle.)
       }
+
+      // --- Pass 4: sync the Rapier body to the schema's position. ---
+      const body = this.rapierBodies.get(sessionId);
+      if (body) body.setNextKinematicTranslation({ x: p.posX, y: p.posY, z: p.posZ });
     });
+
+    // --- Pass 4: advance Rapier. Cheap with only kinematic bodies and
+    //     no collidable interactions yet; the cost grows with Pass 5's
+    //     asteroid/projectile additions. Run AFTER the per-player loop
+    //     so all kinematic targets are set for this tick. ---
+    this.rapier.step();
   }
 }
 
