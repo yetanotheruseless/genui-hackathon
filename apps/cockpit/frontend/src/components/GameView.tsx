@@ -10,7 +10,7 @@
  * take over here.
  */
 import { useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { SetupScreen } from "@/components/SetupScreen";
 import { SideArea } from "@/components/SideArea";
 import { Slot } from "@/components/Slot";
@@ -21,9 +21,36 @@ import { bindWsPlayer } from "@/lib/ws";
 
 export function GameView() {
   const { gameId } = useParams<{ gameId: string }>();
+  const [search, setSearch] = useSearchParams();
+  const wantsFreshJoin = search.get("join") === "new";
   const sessionId = useCockpit((s) => s.sessionId);
+  const storeGameId = useCockpit((s) => s.gameId);
   const playerId = useCockpit((s) => s.playerId);
+  const unbindPlayer = useCockpit((s) => s.unbindPlayer);
   const [reattaching, setReattaching] = useState(true);
+
+  // If the URL gameId doesn't match the store's, we're navigating to a
+  // different galaxy — reset playerId/slots so GameView starts fresh.
+  // Without this, switching galaxies via the lobby falls straight into
+  // the panes layout with stale state (last galaxy's playerId still in
+  // the store).
+  useEffect(() => {
+    if (gameId && storeGameId && storeGameId !== gameId) {
+      unbindPlayer();
+    }
+  }, [gameId, storeGameId, unbindPlayer]);
+
+  // ?join=new forces a fresh Mind picker even if a cached playerId
+  // exists for this gameId. Clears localStorage + the store, then
+  // strips the param so a refresh/back-nav doesn't keep re-firing.
+  useEffect(() => {
+    if (!wantsFreshJoin || !gameId) return;
+    localStorage.removeItem(`cockpit-player-id:${gameId}`);
+    unbindPlayer();
+    const next = new URLSearchParams(search);
+    next.delete("join");
+    setSearch(next, { replace: true });
+  }, [wantsFreshJoin, gameId, unbindPlayer, search, setSearch]);
 
   useEffect(() => {
     if (!gameId || !sessionId || playerId) {
@@ -100,9 +127,15 @@ export function GameView() {
 
 function SwitchVesselButton({ gameId }: { gameId: string }) {
   const navigate = useNavigate();
+  const unbindPlayer = useCockpit((s) => s.unbindPlayer);
   const reset = () => {
     if (!confirm("Abandon this Mind and pick a new vessel?")) return;
     localStorage.removeItem(`cockpit-player-id:${gameId}`);
+    // Clear the Zustand binding too — without this, navigating to the
+    // lobby and clicking ANY galaxy would land in the panes layout
+    // with the previous gameId/playerId still in the store, bypassing
+    // the Mind picker.
+    unbindPlayer();
     navigate("/");
   };
   return (

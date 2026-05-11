@@ -26,6 +26,12 @@ export type CockpitState = {
 
   setSession: (sessionId: string) => void;
   bindPlayer: (gameId: string, playerId: string) => void;
+  /** Clear player binding + every mounted slot. Called by "switch
+   *  vessel" and by GameView when the URL gameId changes — without
+   *  this, the next galaxy/Mind picker is bypassed because GameView's
+   *  render path sees `playerId !== null` and falls straight into the
+   *  panes layout with stale state. */
+  unbindPlayer: () => void;
   setGameState: (state: unknown) => void;
   mountSlot: (slot: SlotName, resourceUri: string, toolResult?: unknown) => void;
   clearSlot: (slot: SlotName) => void;
@@ -40,6 +46,7 @@ export const useCockpit = create<CockpitState>((set) => ({
 
   setSession: (sessionId) => set({ sessionId }),
   bindPlayer: (gameId, playerId) => set({ gameId, playerId }),
+  unbindPlayer: () => set({ gameId: null, playerId: null, gameState: null, slots: {} }),
   setGameState: (gameState) => set({ gameState }),
   mountSlot: (slot, resourceUri, toolResult) =>
     set((s) => ({ slots: { ...s.slots, [slot]: { resourceUri, toolResult } } })),

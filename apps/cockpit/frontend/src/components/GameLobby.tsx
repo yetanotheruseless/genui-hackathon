@@ -101,25 +101,50 @@ export function GameLobby() {
               <div className="text-sm italic text-muted-foreground/60">
                 {galaxies.length === 0 ? "no galaxies yet — start one below." : "no matches."}
               </div>
-            ) : filtered.map((g) => (
-              <button
-                key={g.gameId}
-                onClick={() => navigate(`/game/${encodeURIComponent(g.gameId)}`)}
-                className="rounded border border-border px-3 py-2 text-left transition hover:border-primary hover:bg-accent/30"
-              >
-                <div className="flex items-baseline gap-2">
-                  <span className="font-mono text-sm font-semibold text-primary break-all">{g.gameId}</span>
-                  <span className="ml-auto text-[10px] font-mono text-muted-foreground/70 whitespace-nowrap">
-                    {g.playerCount} player{g.playerCount === 1 ? "" : "s"} · {g.orbitalCount} orb · {relTime(g.createdAt)}
-                  </span>
+            ) : filtered.map((g) => {
+              // Show a "+ new vessel" affordance when localStorage has a
+              // cached playerId for this gameId — otherwise the row's
+              // default click auto-reattaches and there's no path to
+              // join the galaxy with a fresh Mind. The "+" button
+              // navigates with ?join=new which GameView interprets as
+              // "skip reattach, show SetupScreen."
+              const hasCached = !!localStorage.getItem(`cockpit-player-id:${g.gameId}`);
+              return (
+                <div
+                  key={g.gameId}
+                  className="group flex items-stretch rounded border border-border transition hover:border-primary"
+                >
+                  <button
+                    onClick={() => navigate(`/game/${encodeURIComponent(g.gameId)}`)}
+                    className="flex-1 px-3 py-2 text-left hover:bg-accent/30 rounded-l"
+                    title={hasCached
+                      ? "Resume as your cached Mind in this galaxy"
+                      : "Join this galaxy — pick a Mind"}
+                  >
+                    <div className="flex items-baseline gap-2">
+                      <span className="font-mono text-sm font-semibold text-primary break-all">{g.gameId}</span>
+                      <span className="ml-auto text-[10px] font-mono text-muted-foreground/70 whitespace-nowrap">
+                        {g.playerCount} player{g.playerCount === 1 ? "" : "s"} · {g.orbitalCount} orb · {relTime(g.createdAt)}
+                      </span>
+                    </div>
+                    {g.players.length ? (
+                      <div className="mt-1 text-[11px] text-muted-foreground/85">
+                        {g.players.map((p) => `${p.shipClass} ${p.shipName}`).join(" · ")}
+                      </div>
+                    ) : null}
+                  </button>
+                  {hasCached ? (
+                    <button
+                      onClick={() => navigate(`/game/${encodeURIComponent(g.gameId)}?join=new`)}
+                      className="border-l border-border px-3 text-[10px] font-mono uppercase tracking-widest text-muted-foreground/70 hover:bg-accent/30 hover:text-foreground rounded-r"
+                      title="Join this galaxy with a NEW Mind (ignore cached vessel)"
+                    >
+                      + new vessel
+                    </button>
+                  ) : null}
                 </div>
-                {g.players.length ? (
-                  <div className="mt-1 text-[11px] text-muted-foreground/85">
-                    {g.players.map((p) => `${p.shipClass} ${p.shipName}`).join(" · ")}
-                  </div>
-                ) : null}
-              </button>
-            ))}
+              );
+            })}
           </div>
 
           <div className="flex items-center justify-between border-t border-border/40 pt-3">
