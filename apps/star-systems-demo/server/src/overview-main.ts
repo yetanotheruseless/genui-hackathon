@@ -79,11 +79,16 @@ let orbitals: Array<{
   describedAs?: string;
 }> = [];
 let nearbyPlayers: Array<{
+  playerId: string;
   shipName: string;
   mindName: string;
   position: [number, number, number];
   distance: number;
 }> = [];
+
+/** The currently locked target on the server, fed by the get_state
+ *  poll. Used to highlight the matching row in the overview table. */
+let currentTargetId: string | null = null;
 
 let filter: FilterKey = "all";
 let sortKey: SortKey = "distance";
@@ -128,6 +133,7 @@ poll(700, async () => {
   if (!gameId || !playerId) return;
   const state = await callTool<{
     position?: [number, number, number];
+    targetId?: string | null;
     galaxy?: {
       orbitals?: typeof orbitals;
       nearbyPlayers?: typeof nearbyPlayers;
@@ -137,6 +143,7 @@ poll(700, async () => {
   if (state.position) playerPos = state.position;
   if (state.galaxy?.orbitals) orbitals = state.galaxy.orbitals;
   if (state.galaxy?.nearbyPlayers) nearbyPlayers = state.galaxy.nearbyPlayers;
+  currentTargetId = state.targetId ?? null;
   render();
 });
 
@@ -210,17 +217,20 @@ function buildRows(): Row[] {
     });
   }
 
-  // Other ships (read-only — can't warp to a moving target via a snapshot id).
+  // Other ships — keyed by playerId so target/warp resolves via live
+  // player position rather than a stale snapshot. shipName is just for
+  // display (and may not be unique within a galaxy if two players pick
+  // the same Mind).
   for (const p of nearbyPlayers) {
     rows.push({
-      id: `ship:${p.shipName}`,
+      id: `ship:${p.playerId}`,
       kind: "ship",
       icon: "▶",
       name: p.shipName,
       type: `Mind: ${p.mindName}`,
       position: p.position,
       distanceLy: p.distance,
-      action: null,
+      action: { tool: "warp_to", args: { gameId, playerId, objectId: `ship:${p.playerId}` } },
     });
   }
 
@@ -256,10 +266,17 @@ function render() {
   }
 
   // Reuse rows where possible to avoid layout thrash on every poll.
+  // The currently-locked target row gets a .target class for the
+  // amber highlight — server stores targetId without the "star:"
+  // prefix for stars (other kinds keep their prefix), so we strip
+  // it from the row id before comparing.
   let html = "";
   for (const r of sorted) {
     const parent = r.parent ?? "";
-    html += `<tr class="kind-${r.kind}" data-id="${escapeAttr(r.id)}">`
+    const normalizedId = r.id.startsWith("star:") ? r.id.slice("star:".length) : r.id;
+    const isTarget = currentTargetId != null && normalizedId === currentTargetId;
+    const klass = `kind-${r.kind}${isTarget ? " target" : ""}`;
+    html += `<tr class="${klass}" data-id="${escapeAttr(r.id)}">`
       + `<td class="icon">${r.icon}</td>`
       + `<td class="name">${escapeHtml(r.name)}</td>`
       + `<td class="kind">${escapeHtml(r.type)}</td>`

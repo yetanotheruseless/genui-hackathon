@@ -408,7 +408,13 @@ function pinnedStarsView(player: Player) {
 }
 
 function nearbyPlayers(galaxy: Galaxy, self: Player, radiusLy: number = 30) {
-  const result: { shipName: string; mindName: string; position: [number, number, number]; distance: number }[] = [];
+  const result: {
+    playerId: string;
+    shipName: string;
+    mindName: string;
+    position: [number, number, number];
+    distance: number;
+  }[] = [];
   for (const p of galaxy.players.values()) {
     if (p.playerId === self.playerId) continue;
     const d = Math.hypot(
@@ -417,7 +423,13 @@ function nearbyPlayers(galaxy: Galaxy, self: Player, radiusLy: number = 30) {
       p.position[2] - self.position[2],
     );
     if (d <= radiusLy) {
-      result.push({ shipName: p.shipName, mindName: p.mind.name, position: p.position, distance: d });
+      result.push({
+        playerId: p.playerId,
+        shipName: p.shipName,
+        mindName: p.mind.name,
+        position: p.position,
+        distance: d,
+      });
     }
   }
   return result.sort((a, b) => a.distance - b.distance);
@@ -829,6 +841,26 @@ export function createServer(): McpServer {
 
   registerAppTool(
     server,
+    "clear_target",
+    {
+      title: "Unlock the current target",
+      description:
+        "Clears player.targetId and player.warpEngaged. Cockpit reticle hides; HUD shows 'no target'. No-op if nothing was locked.",
+      inputSchema: { gameId: z.string(), playerId: z.string() },
+      _meta: uiMeta(URI.cockpit),
+    },
+    async (args) => {
+      const player = getPlayer(getGalaxy(args.gameId), args.playerId);
+      const had = !!player.targetId;
+      player.targetId = null;
+      player.warpEngaged = false;
+      player.throttle = 0;
+      return { content: [{ type: "text", text: JSON.stringify({ kind: had ? "target_cleared" : "no_target" }) }] };
+    },
+  );
+
+  registerAppTool(
+    server,
     "face_target",
     {
       title: "Face the camera at the locked target without warping",
@@ -1119,10 +1151,11 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const player = getPlayer(getGalaxy(args.gameId), args.playerId);
-      // Planet ids ("planet:<starId>::<name>") are resolved client-side
-      // by the cockpit (it knows the live orbital phase). The server
-      // just records the targetId + engages warp; the cockpit steers.
-      if (args.objectId.startsWith("planet:")) {
+      // Planet and ship ids are resolved against live state on each
+      // tick (planet via orbital phase, ship via the target player's
+      // current position). Server records targetId + engages warp;
+      // the cockpit/StarRoom steers using the live resolved position.
+      if (args.objectId.startsWith("planet:") || args.objectId.startsWith("ship:")) {
         if (player.dockedOrbitalId) {
           const galaxy = getGalaxy(args.gameId);
           const prev = galaxy.orbitals.find((o) => o.id === player.dockedOrbitalId);
@@ -1132,9 +1165,9 @@ export function createServer(): McpServer {
         player.targetId = args.objectId;
         player.warpEngaged = true;
         const sep = args.objectId.indexOf("::");
-        const planetName = sep >= 0 ? args.objectId.slice(sep + 2) : args.objectId;
+        const name = sep >= 0 ? args.objectId.slice(sep + 2) : args.objectId;
         return { content: [{ type: "text", text: JSON.stringify({
-          kind: "warp_engaged", targetId: args.objectId, name: planetName,
+          kind: "warp_engaged", targetId: args.objectId, name,
         }) }] };
       }
       const star = resolveStar(args.objectId);

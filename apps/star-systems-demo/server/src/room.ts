@@ -305,13 +305,28 @@ export class StarRoom extends Room<{ state: World }> {
  *  orbital phase server-side via @genui/star-sim. */
 function resolveTargetPosition(
   targetId: string,
-  galaxy: { orbitals: Array<{ id: string; position: [number, number, number] }> } | undefined,
+  galaxy:
+    | {
+        orbitals: Array<{ id: string; position: [number, number, number] }>;
+        players: Map<string, { playerId: string; position: [number, number, number] }>;
+      }
+    | undefined,
 ): { pos: [number, number, number]; isOrbital: boolean } | null {
   if (!targetId) return null;
   if (targetId.startsWith("orbital:") && galaxy) {
     const oid = targetId.slice("orbital:".length);
     const o = galaxy.orbitals.find((x) => x.id === oid);
     return o ? { pos: o.position, isOrbital: true } : null;
+  }
+  if (targetId.startsWith("ship:") && galaxy) {
+    // ship:<playerId> — find the target player in this galaxy and use
+    // their live position. The autopilot arrival range is 1 AU which
+    // is plenty for "rendezvous near them" semantics.
+    const pid = targetId.slice("ship:".length);
+    for (const p of galaxy.players.values()) {
+      if (p.playerId === pid) return { pos: p.position, isOrbital: false };
+    }
+    return null;
   }
   if (targetId.startsWith("planet:")) {
     const rest = targetId.slice("planet:".length);

@@ -732,13 +732,16 @@ function orbitalTint(o: OrbitalLite): number {
   return c.getHex();
 }
 
-function syncOtherShips(others: any[]) {
+function syncOtherShips(others: Array<{ playerId?: string; shipName?: string; position: [number, number, number] }>) {
   // Pixel-stable sprites: ~5 px on screen regardless of distance. The
   // earlier sizeAttenuation:true + 0.15 ly scale meant a swarm of dead
   // demo players (which accumulate per Liam's CLAUDE.md issue #4) would
   // fill the viewport with green when you flew anywhere near the spawn
   // point.
   otherShipsGroup.clear();
+  // Refresh the playerId → position map so ship: targets resolve while
+  // running on the legacy (Colyseus-off) topology.
+  otherShipsByPlayerId.clear();
   for (const o of others) {
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
       color: 0x88ffd9, sizeAttenuation: false, transparent: true, opacity: 0.9,
@@ -746,6 +749,12 @@ function syncOtherShips(others: any[]) {
     sprite.scale.set(0.008, 0.008, 1);
     sprite.position.set(o.position[0], o.position[1], o.position[2]);
     otherShipsGroup.add(sprite);
+    if (o.playerId) {
+      otherShipsByPlayerId.set(o.playerId, {
+        pos: o.position,
+        shipName: o.shipName ?? "(unnamed)",
+      });
+    }
   }
 }
 
@@ -935,6 +944,12 @@ async function engageWarp(objectId: string) {
 // (resolveTargetInfo lives in target-info-main.ts now — the cockpit
 // only needs position resolution for the reticle, below.)
 
+/** Live { playerId → {pos, shipName} } map populated from both the
+ *  Colyseus state stream (sessionId-keyed Player schema → flatten by
+ *  playerId) and the legacy get_state nearbyPlayers list. Used by
+ *  resolveTargetPosition for ship: targets. */
+const otherShipsByPlayerId = new Map<string, { pos: [number, number, number]; shipName: string }>();
+
 function resolveTargetPosition(id: string | null): { pos: [number, number, number]; isOrbital: boolean; name: string } | null {
   if (!id) return null;
   if (id.startsWith("orbital:")) {
@@ -942,6 +957,16 @@ function resolveTargetPosition(id: string | null): { pos: [number, number, numbe
     const o = orbitalLayers.get(oid)?.data;
     if (!o) return null;
     return { pos: o.position, isOrbital: true, name: o.name };
+  }
+  if (id.startsWith("ship:")) {
+    // ship:<playerId> — resolves to the other player's current
+    // position via the live map. Returns null if the ship has flown
+    // out of nearbyPlayers range (30 ly server-side) — in which case
+    // the reticle hides and the autopilot stops steering.
+    const pid = id.slice("ship:".length);
+    const entry = otherShipsByPlayerId.get(pid);
+    if (!entry) return null;
+    return { pos: entry.pos, isOrbital: false, name: entry.shipName };
   }
   if (id.startsWith("planet:")) {
     // Format: "planet:starId::planetName". Resolves to the planet's
@@ -1173,6 +1198,15 @@ function applyOtherShipUpdate(sessionId: string, p: ServerPlayer) {
   entry.target.x = p.posX;
   entry.target.y = p.posY;
   entry.target.z = p.posZ;
+  // Keep the playerId → position map fresh so ship: targets resolve
+  // against the live position. The schema's playerId is our stable
+  // cross-room identity used by overview-main as the row id.
+  if (p.playerId) {
+    otherShipsByPlayerId.set(p.playerId, {
+      pos: [p.posX, p.posY, p.posZ],
+      shipName: p.shipName,
+    });
+  }
 }
 
 function removeOtherShipSprite(sessionId: string) {
@@ -1181,6 +1215,10 @@ function removeOtherShipSprite(sessionId: string) {
   otherShipsGroup.remove(entry.sprite);
   entry.sprite.material.dispose();
   otherShipSprites.delete(sessionId);
+  // Best-effort: drop from the playerId map too. We don't have the
+  // playerId here (sessionId is the key), so rebuild after a small
+  // delay if needed — for now we leave stale entries and let the
+  // legacy nearbyPlayers fallback overwrite them on the next poll.
 }
 
 /** Called from the render loop. Lerps each other-ship sprite toward

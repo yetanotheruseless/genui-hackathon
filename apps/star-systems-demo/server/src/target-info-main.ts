@@ -45,9 +45,10 @@ const nameEl = document.getElementById("t-name") as HTMLDivElement;
 const statusEl = document.getElementById("t-status") as HTMLDivElement;
 const pillsEl = document.getElementById("t-pills") as HTMLDivElement;
 const descEl = document.getElementById("t-desc") as HTMLDivElement;
-const btnAlign = document.getElementById("btn-align") as HTMLButtonElement;
-const btnWarp  = document.getElementById("btn-warp") as HTMLButtonElement;
-const btnStop  = document.getElementById("btn-stop") as HTMLButtonElement;
+const btnAlign  = document.getElementById("btn-align") as HTMLButtonElement;
+const btnWarp   = document.getElementById("btn-warp") as HTMLButtonElement;
+const btnStop   = document.getElementById("btn-stop") as HTMLButtonElement;
+const btnUnlock = document.getElementById("btn-unlock") as HTMLButtonElement;
 
 const pane = setupPaneApp("Culture Target");
 let gameId = "";
@@ -55,6 +56,13 @@ let playerId = "";
 let stars: StarLite[] = [];
 let playerPos: [number, number, number] = [0, 0, 0];
 let orbitals: OrbitalLite[] = [];
+let nearbyPlayers: Array<{
+  playerId: string;
+  shipName: string;
+  mindName: string;
+  position: [number, number, number];
+  distance: number;
+}> = [];
 let targetId: string | null = null;
 let warpEngaged = false;
 let lastKey = "";
@@ -72,11 +80,15 @@ poll(700, async () => {
     position?: [number, number, number];
     targetId?: string | null;
     warpEngaged?: boolean;
-    galaxy?: { orbitals?: OrbitalLite[] };
+    galaxy?: {
+      orbitals?: OrbitalLite[];
+      nearbyPlayers?: typeof nearbyPlayers;
+    };
   }>(pane.app, "get_state", { gameId, playerId });
   if (!state) return;
   if (state.position) playerPos = state.position;
   if (state.galaxy?.orbitals) orbitals = state.galaxy.orbitals;
+  if (state.galaxy?.nearbyPlayers) nearbyPlayers = state.galaxy.nearbyPlayers;
   targetId = state.targetId ?? null;
   warpEngaged = !!state.warpEngaged;
   render();
@@ -96,14 +108,25 @@ function render() {
   if (contentEl.style.display === "none") contentEl.style.display = "";
 
   // Resolve target → kind-specific info + pill list.
-  let kind: "star" | "planet" | "orbital" | null = null;
+  let kind: "star" | "planet" | "orbital" | "ship" | null = null;
   let name = "?";
   let pos: [number, number, number] | null = null;
   let canWarp = false;
   const pills: Pill[] = [];
   let desc = "";
 
-  if (targetId.startsWith("orbital:")) {
+  if (targetId.startsWith("ship:")) {
+    const pid = targetId.slice("ship:".length);
+    const ship = nearbyPlayers.find((p) => p.playerId === pid);
+    if (ship) {
+      kind = "ship";
+      name = ship.shipName;
+      pos = ship.position;
+      canWarp = true;
+      pills.push({ icon: "▶", value: "ship", tip: "Type" });
+      pills.push({ icon: "✦", value: ship.mindName, tip: "Mind" });
+    }
+  } else if (targetId.startsWith("orbital:")) {
     const oid = targetId.slice("orbital:".length);
     const o = orbitals.find((x) => x.id === oid);
     if (o) {
@@ -229,6 +252,15 @@ btnStop.addEventListener("click", async () => {
     await callTool(pane.app, "stop_engines", { gameId, playerId });
   } catch (e) {
     console.warn("[target-info] stop_engines failed:", e);
+  }
+});
+
+btnUnlock.addEventListener("click", async () => {
+  if (!targetId) return;
+  try {
+    await callTool(pane.app, "clear_target", { gameId, playerId });
+  } catch (e) {
+    console.warn("[target-info] clear_target failed:", e);
   }
 });
 
