@@ -332,6 +332,53 @@ or any single system needing >1 CPU. Exit ramps:
 **For us**, the honest threshold: under ~2k concurrent and no
 fleet-battle systems → Colyseus + sharding wins comfortably.
 
+## Renderer evaluation (parked until after Pass 4)
+
+**Three.js stays for Passes 3–4.** Touching the renderer mid-migration
+mixes two big refactors (state authority + rendering); revisit once
+the Colyseus/Rapier story is solid.
+
+**The driver for revisiting**: we want specific visual capabilities
+that Babylon.js offers out-of-box — particles (warp tunnel, weapon
+trails, nebulae), proper PBR (planets, ships), better glow/lens-flare,
+and a credible WebGPU story for combat scenes with many ships and
+lights.
+
+**Three options when we revisit (post-Pass-4):**
+
+1. **Stay on Three, layer libraries.** `@react-three/drei` for scene
+   helpers + `@react-three/postprocessing` for glow/bloom +
+   `three-nebula` (or DIY GPU particles) + `@react-three/rapier`
+   (already in Three's orbit). Lowest engine-swap cost; we keep all
+   the hand-tuned star/halo/sphere-handoff work. WebGPU via Three's
+   experimental `WebGPURenderer` (still maturing as of r170).
+2. **Adopt R3F (React Three Fiber).** Three.js renderer underneath,
+   declarative scene management on top, plays cleanly with our React
+   host shell. Best ergonomic upgrade without an engine swap.
+   Stackable with option 1.
+3. **Swap to Babylon.js.** Bigger bundle (~150 KB → ~400–500 KB
+   gzipped), but built-in particles + PBR + glow + first-class WebGPU
+   + an inspector. Cost: redo sprite-stack / close-mesh-handoff /
+   bloom tuning in Babylon equivalents. Rapier integration is not
+   first-class in Babylon (it ships HavokPlugin / CannonJSPlugin /
+   AmmoJSPlugin; Rapier would need a custom adapter), so this
+   conflicts mildly with our physics pick.
+
+**Cost not to swap mid-migration**: the cockpit's Three tuning
+(sprite halo unification, sphere mesh handoff at CLOSE_MESH_RANGE_LY,
+log-depth buffer for 1e-7 ly precision, 200× planet/star scale cheat
+with screen-frac cap, magnitude-based star sizing) is non-trivial.
+Mixing that rewrite with the Colyseus state-authority flip would
+multiply risk.
+
+**Decision criteria when we revisit**:
+- If our roadmap concretely includes weapon FX, volumetric warp,
+  nebulae, and ship-vs-ship combat → swap to Babylon is justified.
+- If we want better ergonomics + selective FX upgrades → R3F + drei
+  + postprocessing is the lighter path.
+- If we mostly need state-authority + a polished but minimal
+  renderer → don't touch what's working.
+
 ## Reference implementations
 
 These are the codebases to study before/during implementation:

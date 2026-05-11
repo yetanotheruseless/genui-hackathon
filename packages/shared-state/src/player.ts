@@ -47,9 +47,19 @@ export class Player extends Schema {
   /** Throttle in [0..1]. speed = throttle³ × WARP_MAX_LY_PER_S. */
   throttle = 0;
 
-  /** Warp autopilot engaged toward `targetId` (NOT in schema — see
-   *  "Schema design optimizations" in the ADR; sent via room.send). */
+  /** Warp autopilot engaged toward `targetId`. */
   warpEngaged = false;
+
+  /** Locked target — bare star id (e.g. "sirius_a"),
+   *  "planet:<starId>::<name>", or "orbital:<uuid>". Empty string means
+   *  no target locked. Changes infrequently (only when player picks a
+   *  new target via MCP set_target / warp_to), so the in-schema string
+   *  cost is fine — revisit if churn becomes a problem. */
+  targetId = "";
+
+  /** Orbital uuid we're docked at, or empty string. Set by the server
+   *  on dock_orbital arrival; cleared on undock or warp engage. */
+  dockedOrbitalId = "";
 }
 
 defineTypes(Player, {
@@ -64,4 +74,6 @@ defineTypes(Player, {
   pitch: "float32",
   throttle: "float32",
   warpEngaged: "boolean",
+  targetId: "string",
+  dockedOrbitalId: "string",
 });

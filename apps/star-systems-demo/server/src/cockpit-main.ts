@@ -12,7 +12,9 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 
+import { Client as ColyseusClient, getStateCallbacks, type Room as ColyseusRoom } from "colyseus.js";
 import { callTool, poll, setupPaneApp } from "./shared.js";
+import type { Player as ServerPlayer, World as ServerWorld } from "../../../../packages/shared-state/src/index.js";
 import {
   BRAKE_RANGE_LY,
   departingImpulseThrottle,
@@ -1042,7 +1044,170 @@ pane.initial.then((init) => {
   if (init.llm) hudLlm.textContent = `${init.llm.online ? "" : "offline · "}${init.llm.provider}/${init.llm.model}`;
   if (init.ship && hudShip) hudShip.textContent = init.ship.name;
   if (init.ship && hudMind) hudMind.textContent = init.ship.class;
+  // Pass 3a: connect to the authoritative Colyseus tick. Iframe still
+  // runs its own legacy simulation in parallel during this sub-pass —
+  // we only USE Colyseus for cross-player visibility + drift logging
+  // so we can validate the math is consistent before Pass 3b flips the
+  // iframe to render-only.
+  void connectColyseus(init.ship?.name ?? "(unnamed)", init.ship?.class ?? "GCU");
 });
+
+// --- colyseus (Pass 3a — observational; Pass 3b will read for self) ---
+
+/** Server snapshot of OUR player, latched per state change. Used to
+ *  log drift vs the iframe's local `ship` (validates that the
+ *  packages/star-sim physics is bit-equivalent on both sides). */
+let serverSelf: ServerPlayer | null = null;
+let colyseusRoom: ColyseusRoom<ServerWorld> | null = null;
+let colyseusSessionId = "";
+
+const COLYSEUS_URL = `ws://${window.location.hostname}:${
+  // Allow override via query string for non-default deployments
+  new URLSearchParams(window.location.search).get("colyseusPort") ?? "2567"
+}`;
+
+const RECON_TOKEN_KEY = (gid: string, rid: string) => `cockpit-recon-token:${gid}:${rid}`;
+
+/** Try reconnect-first, fall back to joinOrCreate. */
+async function joinStarRoom(client: ColyseusClient, ship: string, cls: string): Promise<ColyseusRoom<ServerWorld>> {
+  const lastRoomId = localStorage.getItem(`cockpit-last-room:${gameId}`);
+  if (lastRoomId) {
+    const tok = localStorage.getItem(RECON_TOKEN_KEY(gameId, lastRoomId));
+    if (tok) {
+      try {
+        const r = await client.reconnect(tok) as ColyseusRoom<ServerWorld>;
+        console.log(`[colyseus] reconnected to room ${r.roomId}`);
+        return r;
+      } catch (e) {
+        console.warn(`[colyseus] reconnect failed, joining fresh:`, e);
+        localStorage.removeItem(RECON_TOKEN_KEY(gameId, lastRoomId));
+      }
+    }
+  }
+  const r = await client.joinOrCreate<ServerWorld>("star", {
+    gameId, playerId, shipName: ship, shipClass: cls,
+  });
+  console.log(`[colyseus] joined room ${r.roomId}`);
+  return r;
+}
+
+async function connectColyseus(shipName: string, shipClass: string) {
+  try {
+    const client = new ColyseusClient(COLYSEUS_URL);
+    const room = await joinStarRoom(client, shipName, shipClass);
+    colyseusRoom = room;
+    colyseusSessionId = room.sessionId;
+    // Cache per-room reconnection token; rotated on every join.
+    localStorage.setItem(`cockpit-last-room:${gameId}`, room.roomId);
+    localStorage.setItem(RECON_TOKEN_KEY(gameId, room.roomId), room.reconnectionToken);
+
+    const $ = getStateCallbacks(room);
+    // Listen for player adds/removes; for each Player, write Schema
+    // field updates into the matching otherShipsByColyseus entry (or
+    // identify the self via sessionId match).
+    $(room.state).players.onAdd((player: ServerPlayer, sessionId: string) => {
+      if (sessionId === colyseusSessionId) {
+        // Track server snapshot of self for drift logging. Pass 3b
+        // will read from it directly.
+        serverSelf = player;
+        return;
+      }
+      // OTHER player joined — create or attach a sprite for them.
+      ensureOtherShipSprite(sessionId);
+      $(player).onChange(() => {
+        applyOtherShipUpdate(sessionId, player);
+      });
+    });
+    $(room.state).players.onRemove((_player: ServerPlayer, sessionId: string) => {
+      if (sessionId === colyseusSessionId) {
+        serverSelf = null;
+        return;
+      }
+      removeOtherShipSprite(sessionId);
+    });
+
+    room.onLeave((code) => {
+      console.warn(`[colyseus] left room (code=${code})`);
+      colyseusRoom = null;
+      serverSelf = null;
+    });
+    room.onError((code, msg) => {
+      console.warn(`[colyseus] error ${code}: ${msg}`);
+    });
+  } catch (e) {
+    console.warn("[colyseus] connection failed (Pass 3a is non-fatal):", e);
+  }
+}
+
+// --- other-ship rendering via Colyseus -----------------------------
+// Per-sessionId sprite kept across snapshots so we don't rebuild every
+// patch. Map sessionId → sprite + last-known target position. Per
+// render frame we lerp the sprite toward the target.
+const otherShipSprites = new Map<string, {
+  sprite: THREE.Sprite;
+  target: { x: number; y: number; z: number };
+}>();
+
+function ensureOtherShipSprite(sessionId: string) {
+  if (otherShipSprites.has(sessionId)) return;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    color: 0x88ffd9, sizeAttenuation: false, transparent: true, opacity: 0.9,
+  }));
+  sprite.scale.set(0.008, 0.008, 1);
+  otherShipsGroup.add(sprite);
+  otherShipSprites.set(sessionId, { sprite, target: { x: 0, y: 0, z: 0 } });
+}
+
+function applyOtherShipUpdate(sessionId: string, p: ServerPlayer) {
+  const entry = otherShipSprites.get(sessionId);
+  if (!entry) return;
+  entry.target.x = p.posX;
+  entry.target.y = p.posY;
+  entry.target.z = p.posZ;
+}
+
+function removeOtherShipSprite(sessionId: string) {
+  const entry = otherShipSprites.get(sessionId);
+  if (!entry) return;
+  otherShipsGroup.remove(entry.sprite);
+  entry.sprite.material.dispose();
+  otherShipSprites.delete(sessionId);
+}
+
+/** Called from the render loop. Lerps each other-ship sprite toward
+ *  its latched server target (single-snapshot lerp, the realtime-
+ *  tanks-demo pattern). */
+function tickOtherShipsFromColyseus() {
+  if (otherShipSprites.size === 0) return;
+  const k = 0.2;
+  for (const { sprite, target } of otherShipSprites.values()) {
+    sprite.position.x = THREE.MathUtils.lerp(sprite.position.x, target.x, k);
+    sprite.position.y = THREE.MathUtils.lerp(sprite.position.y, target.y, k);
+    sprite.position.z = THREE.MathUtils.lerp(sprite.position.z, target.z, k);
+  }
+}
+
+/** Drift logger — fires at ~1 Hz. Lets us eyeball whether the local
+ *  iframe sim and the server's authoritative sim are producing
+ *  matching positions for OUR ship. */
+let lastDriftLog = 0;
+function logSelfDriftMaybe(nowMs: number) {
+  if (!serverSelf || nowMs - lastDriftLog < 1000) return;
+  lastDriftLog = nowMs;
+  const dx = serverSelf.posX - ship.position.x;
+  const dy = serverSelf.posY - ship.position.y;
+  const dz = serverSelf.posZ - ship.position.z;
+  const dist = Math.hypot(dx, dy, dz);
+  if (dist > 0.0001) {
+    // Only log when drift is non-trivial — sub-mly drift is invisible
+    // anyway and clutters the console.
+    console.log(
+      `[drift] local=[${ship.position.x.toFixed(6)},${ship.position.y.toFixed(6)},${ship.position.z.toFixed(6)}] ` +
+      `server=[${serverSelf.posX.toFixed(6)},${serverSelf.posY.toFixed(6)},${serverSelf.posZ.toFixed(6)}] ` +
+      `Δ=${dist.toFixed(6)} ly`,
+    );
+  }
+}
 
 // --- main loop ---
 let last = performance.now();
@@ -1465,6 +1630,10 @@ function tick() {
 
   updateHud(fwd);
   updateReticle();
+  // Pass 3a: lerp other-ship sprites from Colyseus snapshots toward
+  // their latest known position; log self-drift vs server at ~1 Hz.
+  tickOtherShipsFromColyseus();
+  logSelfDriftMaybe(now);
   // (target info panel runs in its own iframe; no per-frame work here.)
   composer.render();
   requestAnimationFrame(tick);
@@ -1710,5 +1879,11 @@ poll(200, async () => {
     throttleEl.value = "0";
   }
   if (state?.galaxy?.orbitals) syncOrbitals(state.galaxy.orbitals);
-  if (state?.galaxy?.nearbyPlayers) syncOtherShips(state.galaxy.nearbyPlayers);
+  // Other-ship rendering: prefer Colyseus snapshots when connected
+  // (per-sessionId sprites lerped per frame). Fall back to the
+  // legacy get_state path when Colyseus is offline so the cockpit
+  // still works without a Colyseus server.
+  if (!colyseusRoom && state?.galaxy?.nearbyPlayers) {
+    syncOtherShips(state.galaxy.nearbyPlayers);
+  }
 });
