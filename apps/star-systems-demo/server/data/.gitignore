@@ -5,3 +5,8 @@
 # Comment these out if you want to commit them (51 MB + 3 MB respectively).
 hyg.json
 exoplanets.json
+
+# Planetary textures — regenerate with `npx tsx scripts/fetch-planet-textures.ts`.
+# CC BY 4.0 from Solar System Scope; we don't ship them in-tree.
+textures/
+textures.json

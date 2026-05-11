@@ -8,13 +8,26 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
+import express from "express";
 import type { Request, Response } from "express";
+import * as path from "node:path";
 import { createServer } from "./server.js";
 
 async function startHttp(create: () => McpServer): Promise<void> {
   const port = parseInt(process.env.PORT ?? "3030", 10);
   const app = createMcpExpressApp({ host: "0.0.0.0" });
   app.use(cors());
+
+  // Static planetary imagery + the prototype HTML page. Textures are
+  // fetched via `npx tsx scripts/fetch-planet-textures.ts` (CC BY 4.0
+  // from Solar System Scope); the page is built into `dist/` by vite.
+  // Both routes are no-ops if the corresponding files don't exist yet.
+  const dataDir = path.resolve(import.meta.dirname, "data");
+  const distDir = path.resolve(import.meta.dirname, "dist");
+  app.use("/textures", express.static(path.join(dataDir, "textures"), { maxAge: "1h" }));
+  app.get("/textures.json", (_req, res) => res.sendFile(path.join(dataDir, "textures.json")));
+  app.get("/planet-prototype", (_req, res) => res.sendFile(path.join(distDir, "planet-prototype.html")));
+
   app.all("/mcp", async (req: Request, res: Response) => {
     const server = create();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
@@ -38,6 +51,7 @@ async function startHttp(create: () => McpServer): Promise<void> {
   });
   const httpServer = app.listen(port, () => {
     console.log(`Star-Systems MCP Apps server listening on http://localhost:${port}/mcp`);
+    console.log(`Planet-imagery prototype at         http://localhost:${port}/planet-prototype`);
   });
   const shutdown = () => httpServer.close(() => process.exit(0));
   process.on("SIGINT", shutdown);

@@ -205,16 +205,43 @@ apps/star-systems-demo/server/
 ├── culture.ts                    # 7 Mind personas + ship class info
 ├── llm.ts                        # provider-agnostic getModel + generateTyped
 ├── server.ts                     # 12 MCP tools
-├── main.ts                       # HTTP / stdio transports
+├── main.ts                       # HTTP / stdio transports + /textures static
 ├── cockpit.html                  # 3D viewport + throttle + HUD
 ├── compendium.html               # discoveries + orbitals + others + public chat
 ├── bridge.html                   # chat with the Mind
+├── planet-prototype.html         # standalone planet-imagery prototype
+├── scripts/
+│   └── fetch-planet-textures.ts  # downloads PD planet maps → data/textures/
 └── src/
     ├── shared.ts                 # MCP App bridge + polling helper
     ├── cockpit-main.ts           # Three.js + warp/impulse + auto-observe + render orbitals + render other ships
     ├── compendium-main.ts        # poll get_state, render counts/orbitals/others/chat; build_orbital + send_public
-    └── bridge-main.ts            # chat input + scroll log + poll get_state
+    ├── bridge-main.ts            # chat input + scroll log + poll get_state
+    └── planet-prototype-main.ts  # Three.js + WebGPU planet renderer (WebGL fallback)
 ```
+
+## Planet-imagery prototype (WIP)
+
+Standalone page that demonstrates the imagery-onto-planet pipeline:
+
+```bash
+cd apps/star-systems-demo/server
+npm run fetch:textures      # ~3 MB of public-domain planet maps → data/textures/
+npm run build               # also builds dist/planet-prototype.html
+PORT=3030 npm start
+# open http://localhost:3030/planet-prototype
+```
+
+- Solar System bodies (Sun through Neptune + Moon) painted onto Three.js
+  spheres from equirectangular maps in `data/textures/`.
+- Color + cloud + atmosphere + ring layers stacked per body.
+- Bump + normal maps where the source provides them (Earth, Moon, Mars, Mercury).
+- `three/webgpu` `WebGPURenderer` when `navigator.gpu` is available,
+  classic `WebGLRenderer` otherwise. Status badge shows which backend won.
+- Not yet wired into the cockpit. The intent is for the cockpit's
+  close-star sphere logic in `cockpit-main.ts` to do the same kind of
+  per-body texture stacking once the planet representation lands in the
+  in-system simulation.
 
 ## Tools
 
