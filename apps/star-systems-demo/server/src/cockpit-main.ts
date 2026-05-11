@@ -166,13 +166,28 @@ scene.clearColor = new Color4(0.016, 0.024, 0.039, 1); // match Three's --bg #04
 scene.useRightHandedSystem = true;
 
 // UniversalCamera with no built-in inputs — we drive yaw/pitch from the
-// existing drag-to-look handlers below. minZ small enough to not clip
-// nearby in-system bodies; maxZ large enough to render stars at hundreds
-// of ly. Full log-depth tuning is TODO(babylon).
+// existing drag-to-look handlers below.
+//
+// Depth precision: we render bodies from 1e-7 ly (planet surfaces at
+// sub-AU range) to hundreds of ly. A plain Z-buffer with minZ small
+// enough not to clip in-system bodies (~1e-8 ly) and maxZ ~5000 ly
+// would have ~5e11 precision ratio — far worse than float32 can
+// resolve, so we'd lose depth ordering on distant stars.
+//
+// Fix: scene.useReverseDepthBuffer = true. This flips Z so the near
+// plane gets the precise end of the float32 range, dramatically
+// improving precision for objects close to the camera. Babylon also
+// disables built-in early-Z when this is on, so emissive-only
+// far-stars (no depth writes that matter) coexist cleanly with
+// the in-system meshes that need fine depth ordering.
+//
+// Without reverse-Z, the previous minZ=0.0001 (6.3 AU near plane)
+// was clipping the in-system view of Sol when the ship got close.
+engine.useReverseDepthBuffer = true;
 const camera = new UniversalCamera("cam", new Vector3(0, 0, 0), scene);
 camera.fov = 70 * Math.PI / 180;
-camera.minZ = 0.0001;
-camera.maxZ = 5000;
+camera.minZ = 1e-9; // ~0.06 AU = ~10 km — comfortably below planet surfaces
+camera.maxZ = 1000; // ~1000 ly — covers the visible volume; reduce later
 camera.inputs.clear();
 scene.activeCamera = camera;
 
