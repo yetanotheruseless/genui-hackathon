@@ -907,6 +907,20 @@ function pickBodyUnderClick(clientX: number, clientY: number): string | null {
       bestId = `planet:${pm.starId}::${pm.planetName}`;
     }
   }
+  // Other-player ships — picked against the live playerId map populated
+  // by both the Colyseus state stream and the legacy nearbyPlayers
+  // poll. Click yields a `ship:<playerId>` target id.
+  const _tmp = new THREE.Vector3();
+  for (const [pid, entry] of otherShipsByPlayerId) {
+    _tmp.set(entry.pos[0], entry.pos[1], entry.pos[2]).sub(camera.position);
+    if (_tmp.lengthSq() < 1e-12) continue;
+    _tmp.normalize();
+    const angle = _tmp.angleTo(raycaster.ray.direction);
+    if (angle < bestAngle) {
+      bestAngle = angle;
+      bestId = `ship:${pid}`;
+    }
+  }
   return bestId;
 }
 

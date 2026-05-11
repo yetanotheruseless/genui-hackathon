@@ -124,7 +124,42 @@
         cursor: pointer;
       }
       tbody tr:hover { background: rgba(122, 215, 255, 0.04); }
-      tbody tr.target { background: rgba(255, 210, 138, 0.08); }
+
+      /* Locked-target row: stronger amber fill + bordered corner
+         brackets reminiscent of the empty-state framing. The td.icon
+         and td.dist (first/last visible columns) carry the bracket
+         halves so the corners land at the visual row edges. */
+      tbody tr.target {
+        background: rgba(255, 210, 138, 0.14);
+        outline: 1px solid rgba(255, 210, 138, 0.32);
+        outline-offset: -1px;
+      }
+      tbody tr.target td.name {
+        color: var(--star);
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      tbody tr.target td.icon { position: relative; }
+      tbody tr.target td.dist { position: relative; }
+      /* Corner-bracket halves on the row's first + last cells. Two
+         pseudo-elements per side gives all 4 corners. */
+      tbody tr.target td.icon::before,
+      tbody tr.target td.icon::after,
+      tbody tr.target td.dist::before,
+      tbody tr.target td.dist::after {
+        content: "";
+        position: absolute;
+        width: 8px;
+        height: 8px;
+        border-color: var(--star);
+        border-style: solid;
+        border-width: 0;
+        pointer-events: none;
+      }
+      tbody tr.target td.icon::before { top: 2px;    left: 2px;    border-top-width:    2px; border-left-width:  2px; }
+      tbody tr.target td.icon::after  { bottom: 2px; left: 2px;    border-bottom-width: 2px; border-left-width:  2px; }
+      tbody tr.target td.dist::before { top: 2px;    right: 2px;   border-top-width:    2px; border-right-width: 2px; }
+      tbody tr.target td.dist::after  { bottom: 2px; right: 2px;   border-bottom-width: 2px; border-right-width: 2px; }
       tbody td {
         padding: 4px 8px;
         white-space: nowrap;
