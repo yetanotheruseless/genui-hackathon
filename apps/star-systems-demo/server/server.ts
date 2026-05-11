@@ -59,6 +59,7 @@ import {
   type FullCatalog,
 } from "./catalog.js";
 import { generateTyped, getModel, getModelName, getProvider, hasCredentials } from "./llm.js";
+import { ORBITAL_DOCK_RANGE_LY } from "../../../packages/star-sim/src/index.js";
 
 const DIST_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist");
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "data");
@@ -208,7 +209,10 @@ type Orbital = {
  *  parks itself at orbital.position when warp_to_orbital is called, so
  *  in practice the ship is centimeters away — this margin just gives
  *  the captain agent or a manually-flying player some slop. */
-const DOCK_RANGE_LY = 0.5 * (1 / 63241.077);
+// Dockable radius around an Orbital. Mirrors @genui/star-sim's
+// ORBITAL_DOCK_RANGE_LY — local alias keeps existing call sites
+// unchanged while removing the duplicate numeric definition.
+const DOCK_RANGE_LY = ORBITAL_DOCK_RANGE_LY;
 
 type PublicMessage = { id: string; fromPlayerId: string; fromShipName: string; text: string; ts: number };
 

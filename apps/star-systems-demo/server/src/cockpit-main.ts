@@ -13,6 +13,18 @@ import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 
 import { callTool, poll, setupPaneApp } from "./shared.js";
+import {
+  BRAKE_RANGE_LY,
+  departingImpulseThrottle,
+  EARTH_RADIUS_LY,
+  formatDistanceShort,
+  formatSpeedShort,
+  LY_PER_AU,
+  maxImpulseThrottle,
+  SOL_RADIUS_LY,
+  speedFromThrottle,
+  stepWarpAlignment,
+} from "../../../../packages/star-sim/src/index.js";
 
 type PlanetLite = {
   name: string;
@@ -31,12 +43,9 @@ type StarLite = {
   planets?: PlanetLite[];      // populated when the star has known planets
 };
 
-// Unit conversions used everywhere in the cockpit.
-const LY_PER_AU = 1 / 63241.077;     // 1 ly = 63241 AU
-const SOL_RADIUS_AU = 0.00465047;    // R☉ in AU
-const SOL_RADIUS_LY = SOL_RADIUS_AU * LY_PER_AU;
-const EARTH_RADIUS_AU = 4.26e-5;     // R⊕ in AU
-const EARTH_RADIUS_LY = EARTH_RADIUS_AU * LY_PER_AU;
+// Unit conversions + physics constants are now in @genui/star-sim
+// (packages/star-sim/src/constants.ts). LY_PER_AU, SOL_RADIUS_AU,
+// SOL_RADIUS_LY, EARTH_RADIUS_AU, EARTH_RADIUS_LY are imported above.
 
 // Planet rendering uses a "demo cheat" multiplier so they're visible at
 // AU distances. At true scale, Earth from 1 AU subtends 17 arcsec — way
@@ -80,18 +89,9 @@ const PLANET_COLOR: Record<string, number> = {
   super_jupiter: 0x9c3e2e,  // deep red
 };
 
-// In-system gameplay range. Within this distance of any star, the
-// cockpit auto-throttles to a sub-warp speed so you can actually see
-// the system instead of zooming through it. The systemLight, planet
-// visibility, and auto-observe trigger off this same threshold.
-const BRAKE_RANGE_AU = 100;
-const BRAKE_RANGE_LY = BRAKE_RANGE_AU * LY_PER_AU;
+// BRAKE_RANGE_AU/LY and WARP_MAX_LY_PER_S now live in @genui/star-sim;
+// see ./packages/star-sim/src/constants.ts. They're imported above.
 
-/** Top warp speed in light-years per second.
- *  speed = throttle³ × WARP_MAX_LY_PER_S, so the slider's lower 60% is
- *  sub-light / low-warp (precise approaches) and the top spans warps 4–9.
- *  Picked so an 800-ly trip (Rigel) lands in ~45 s at full throttle. */
-const WARP_MAX_LY_PER_S = 20;
 // Wider band where the closest star is rendered as a real sphere
 // (closeStarMesh) with min-pixel clamp instead of the sprite. Closes
 // the visible gap between "tiny far sprite" and "in-system planets+
@@ -244,7 +244,7 @@ const orbitalHabitatLayer = new THREE.Group(); // closeup LOD: real ring geometr
 scene.add(orbitalIconLayer);
 scene.add(orbitalHabitatLayer);
 const ORBITAL_CLOSEUP_RANGE_LY = BRAKE_RANGE_LY * 2;
-const ORBITAL_DOCK_RANGE_LY = 0.5 * LY_PER_AU;  // mirror of server DOCK_RANGE_LY
+// ORBITAL_DOCK_RANGE_LY now imported from @genui/star-sim.
 const otherShipsGroup = new THREE.Group();
 scene.add(otherShipsGroup);
 
@@ -769,68 +769,11 @@ let lastStopRequestTs = 0;
 // server's warpEngaged transitions false→true (a fresh warp_to call).
 let lastArrivedTargetId: string | null = null;
 let lastServerWarpEngaged = false;
-// Observe + autopilot-disengage fires when entering the brake range.
-// Tightened from a wide 0.15 ly cordon to BRAKE_RANGE_AU (100 AU), so
-// "arriving in a system" actually means you've reached planetary distances.
-const OBSERVE_RANGE_LY = BRAKE_RANGE_LY;
-
-/** Unified deceleration ladder used by BOTH autopilot's target throttle
- *  and the autobrake's cap, so a warp-into-system run is smooth whether
- *  the trip is autopilot-driven or you're aiming a star manually.
- *
- *  Budget: starting at 1 ly out, the throttles below land you at 1 AU
- *  in ~20 s under the cubic speed law (speed = throttle³ · 20 ly/s):
- *    1 ly → 100 AU :  5 s  @ 0.2 ly/s
- *    100 → 10 AU   :  5 s  through stepped cap (30 / 18 / 6 AU/s)
- *    10 → 1 AU     : 10 s  through stepped cap (2 / 0.6 AU/s)
- *
- *  Caps were derived as cbrt(au_per_sec / 63241 / WARP_MAX_LY_PER_S);
- *  re-derive if WARP_MAX_LY_PER_S ever changes. */
-function speedCapThrottleByLy(distLy: number): number {
-  if (distLy > 1.0) return 1.0;
-  const distAu = distLy / LY_PER_AU;
-  if (distAu > 100) return 0.215;   // 0.2 ly/s   (cruise→approach)
-  if (distAu > 50)  return 0.0286;  // 30 AU/s
-  if (distAu > 20)  return 0.0242;  // 18 AU/s
-  if (distAu > 10)  return 0.0168;  // 6 AU/s
-  if (distAu > 5)   return 0.0117;  // 2 AU/s
-  if (distAu > 1)   return 0.00782; // 0.6 AU/s
-  return 0.00684;                   // 0.4 AU/s near the photosphere
-}
-
-/** Autobrake cap by distance to the closest star, in AU. Outside the
- *  brake range (100 AU) full throttle is allowed; inside, the same
- *  ladder as autopilot so a cruise→approach is smooth and consistent. */
-function maxImpulseThrottle(distAu: number): number {
-  if (distAu > 100) return 1.0;
-  return speedCapThrottleByLy(distAu * LY_PER_AU);
-}
-
-/** Looser cap used when the player is clearly DEPARTING a star but
- *  still inside the INNER_AU cordon — symmetric arrival caps are too
- *  conservative outbound, where there's no risk of a misaimed yaw
- *  putting you on a planet. The ladder is shifted up one band so that
- *  a 1 → 10 AU outbound trip takes ~3s instead of ~9s. */
-function departingImpulseThrottle(distAu: number): number {
-  if (distAu > 5)  return 0.0168;   // 6 AU/s   (vs 2 on approach)
-  if (distAu > 1)  return 0.0117;   // 2 AU/s   (vs 0.6 on approach)
-  return 0.00782;                   // 0.6 AU/s (vs 0.4 near photosphere)
-}
-
-/** Autopilot's target throttle from distance-to-target. At cruise
- *  range (> 1 ly) we want full warp; closer in we share the brake's
- *  deceleration ladder so the smoothing converges to the right cap
- *  band without fighting the brake. */
-function autopilotTargetThrottle(distLy: number): number {
-  if (distLy > 1.0) return 0.95;
-  return speedCapThrottleByLy(distLy);
-}
-
-/** Where the autopilot disengages and parks the ship. Was 100 AU which
- *  meant warp-to-system stopped at the edge of the cordon; the player
- *  then had to manually creep in for minutes to actually see anything.
- *  1 AU drops you at planetary range so the system is right there. */
-const AUTOPILOT_ARRIVAL_LY = 1 * LY_PER_AU;
+// Throttle/brake math + arrival/observe ranges now live in
+// @genui/star-sim (packages/star-sim/src/throttle.ts + constants.ts):
+//   speedCapThrottleByLy, maxImpulseThrottle, departingImpulseThrottle,
+//   autopilotTargetThrottle, OBSERVE_RANGE_LY, AUTOPILOT_ARRIVAL_LY,
+//   ORBITAL_DOCK_RANGE_LY. All imported above.
 
 // User-driven "look at" target. When set, tick() slerps yaw/pitch toward it
 // without changing position or throttle. Cleared by drag, by reaching it,
@@ -1116,55 +1059,25 @@ function tick() {
   if (ship.warpEngaged && ship.targetId) {
     const target = resolveTargetPosition(ship.targetId);
     if (target) {
-      const targetPos = new THREE.Vector3(...target.pos);
-      const dir = targetPos.clone().sub(ship.position);
-      const dist = dir.length();
-      dir.normalize();
+      // Phase 1 / Phase 2 alignment math is in @genui/star-sim. Pure
+      // function returns new yaw/pitch/throttle + an `arrived` flag.
+      // Side effects (DOM throttle slider, server stop_engines, observe,
+      // dock_orbital) stay here — they're not pure.
+      const result = stepWarpAlignment({
+        shipPos: { x: ship.position.x, y: ship.position.y, z: ship.position.z },
+        shipFwd: { x: fwd.x, y: fwd.y, z: fwd.z },
+        shipThrottle: ship.throttle,
+        targetPos: { x: target.pos[0], y: target.pos[1], z: target.pos[2] },
+        isOrbital: target.isOrbital,
+        dt,
+      });
+      ship.yaw = result.yaw;
+      ship.pitch = result.pitch;
+      ship.throttle = result.throttle;
+      throttleEl.value = result.throttle.toString();
 
-      // Phase 1 (alignment): camera lerps to face the target with throttle
-      // pinned at 0. Without this, at high warp speeds the slow camera
-      // lerp + concurrent forward motion makes the ship arc around the
-      // target — the classic "flying in circles" symptom. We hold here
-      // until alignment is within ALIGN_TOLERANCE, then snap once and
-      // switch into Phase 2.
-      // Phase 2 (warp): yaw/pitch snap-track the live target direction
-      // each frame (the bearing changes as we move closer), throttle
-      // ramps to autopilotTargetThrottle, ship moves forward.
-      const ALIGN_TOLERANCE = 0.04;        // ~2.3°
-      const ALIGN_LERP_RATE = 6;           // rad/sec for the rotate-only phase
-      const cosErr = Math.max(-1, Math.min(1, fwd.dot(dir)));
-      const angleErr = Math.acos(cosErr);
-
-      if (angleErr > ALIGN_TOLERANCE) {
-        // Phase 1: rotate only, no movement.
-        const blend = Math.min(1, dt * ALIGN_LERP_RATE);
-        const newFwd = fwd.clone().lerp(dir, blend).normalize();
-        ship.yaw   = Math.atan2(newFwd.x, -newFwd.z);
-        ship.pitch = Math.asin(Math.max(-1, Math.min(1, newFwd.y)));
-        ship.throttle = 0;
-        throttleEl.value = "0";
-        // Skip the rest of warp tick (movement / arrival) until aligned.
-        const arrivalRangeSkip = target.isOrbital ? ORBITAL_DOCK_RANGE_LY : AUTOPILOT_ARRIVAL_LY;
-        void arrivalRangeSkip;       // silence unused: keep symmetric with Phase 2 arrival check
-      } else {
-        // Phase 2: snap to live bearing, no lerp — guarantees we never
-        // describe an arc around the target as we close on it.
-        ship.yaw   = Math.atan2(dir.x, -dir.z);
-        ship.pitch = Math.asin(Math.max(-1, Math.min(1, dir.y)));
-      // Orbitals get a much tighter arrival distance than star systems —
-      // the dock_orbital tool requires being within ~0.5 AU. For stars
-      // we use AUTOPILOT_ARRIVAL_LY (1 AU) so the trip ends at planetary
-      // range, not at the 100-AU edge of the brake cordon (which used
-      // to leave the player a tedious manual creep-in away from
-      // anything visible).
-      const arrivalRange = target.isOrbital ? ORBITAL_DOCK_RANGE_LY : AUTOPILOT_ARRIVAL_LY;
-      const targetThrottle = autopilotTargetThrottle(dist);
-      ship.throttle = ship.throttle * 0.85 + targetThrottle * 0.15;
-      throttleEl.value = ship.throttle.toString();
-      if (dist <= arrivalRange) {
+      if (result.arrived) {
         ship.warpEngaged = false;
-        ship.throttle = 0;
-        throttleEl.value = "0";
         // Tell the server the warp is done — clears player.warpEngaged
         // so the get_state poll doesn't keep re-engaging us next frame
         // (and so the target-info pane's WARPING badge clears). One
@@ -1188,7 +1101,6 @@ function tick() {
           }
         }
       }
-      }   // close Phase 2 else
     }
   }
 
@@ -1220,7 +1132,7 @@ function tick() {
   // segment the star sits, so we can snap ship.position to the
   // brake-range entry point instead of stopping 12 000 AU short of
   // the system the player was trying to reach.
-  const speedNow = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
+  const speedNow = speedFromThrottle(ship.throttle);
   const segLen = speedNow * dt;
   const vSeg = fwd.clone().multiplyScalar(segLen);  // p_next = p_now + vSeg
   const vSegLenSq = vSeg.lengthSq();
@@ -1319,7 +1231,7 @@ function tick() {
   // will actually be at when we render. Without this, when autobrake
   // clamps throttle the body visibly shrinks for one frame each time.
   if (closest) {
-    const speedFinal = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
+    const speedFinal = speedFromThrottle(ship.throttle);
     const fx = fwd.x * speedFinal * dt;
     const fy = fwd.y * speedFinal * dt;
     const fz = fwd.z * speedFinal * dt;
@@ -1541,7 +1453,7 @@ function tick() {
     layers.icon.scale.set(r, r, 1);
   }
 
-  const speed = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
+  const speed = speedFromThrottle(ship.throttle);
   if (speed > 0) ship.position.addScaledVector(fwd, speed * dt);
 
   camera.position.copy(ship.position);
@@ -1559,7 +1471,7 @@ function tick() {
 }
 
 function updateHud(fwd: THREE.Vector3) {
-  const speed = Math.pow(ship.throttle, 3) * WARP_MAX_LY_PER_S;
+  const speed = speedFromThrottle(ship.throttle);
   // Display: log scale across the new ~0.005…20 ly/s range. Calibrated
   // so the impulse/warp boundary is at 0.005 ly/s (warp 1) and full
   // throttle reads warp 9. 2.22 ≈ 8 / log10(20/0.005).
@@ -1719,35 +1631,8 @@ function updateReticle() {
   }
 }
 
-// Reticle-readout formatters. Compact, mono-friendly, no units when the
-// next bigger one would have made the value < 0.01.
-function formatSpeedShort(throttle: number): string {
-  // Same speed model as updateHud: speed = throttle³ × WARP_MAX_LY_PER_S.
-  const lyPerS = Math.pow(throttle, 3) * WARP_MAX_LY_PER_S;
-  if (lyPerS < 0.005) {
-    // Sub-warp: c-fraction (impulse). 1 ly/s ≈ 31.6 million c, but in
-    // this game's number scale the small-throttle range maps cleanly to
-    // 0–1c via the same 200× factor used in updateHud's "impulse" tier.
-    const c = lyPerS * 200;
-    if (c < 0.01) return "0.00c";
-    return `${c.toFixed(2)}c`;
-  }
-  // Warp tier: round to nearest integer warp factor.
-  const warp = Math.min(9, Math.max(1, 1 + 2.22 * Math.log10(lyPerS / 0.005)));
-  return `warp ${Math.round(warp)}`;
-}
-
-function formatDistanceShort(ly: number): string {
-  if (ly >= 0.1) return `${ly.toFixed(2)} ly`;
-  if (ly >= 0.01) return `${ly.toFixed(3)} ly`;
-  const au = ly / LY_PER_AU;
-  if (au >= 100) return `${au.toFixed(0)} au`;
-  if (au >= 10) return `${au.toFixed(1)} au`;
-  if (au >= 0.1) return `${au.toFixed(2)} au`;
-  // Very close — light-minutes for sub-AU separation.
-  const lm = ly * 525949.2;
-  return `${lm.toFixed(1)} lmin`;
-}
+// formatSpeedShort + formatDistanceShort are now in @genui/star-sim
+// (packages/star-sim/src/format.ts), imported above.
 
 function resize() {
   const r = canvas.parentElement!.getBoundingClientRect();
