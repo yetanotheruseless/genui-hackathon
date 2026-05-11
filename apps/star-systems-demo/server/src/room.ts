@@ -18,13 +18,12 @@
  */
 import { Client, Room } from "colyseus";
 import {
-  AUTOPILOT_ARRIVAL_LY,
-  ORBITAL_DOCK_RANGE_LY,
   speedFromThrottle,
   stepWarpAlignment,
 } from "../../../../packages/star-sim/src/index.js";
 import { Player, World } from "../../../../packages/shared-state/src/index.js";
 import { clearRoomAssignment, recordRoomAssignment } from "../persistence.js";
+import { getGalaxies, STAR_INDEX } from "../server.js";
 
 // Pass 2 doesn't read the legacy galaxy record yet; it just holds its
 // own state. Pass 3 will hydrate from getGalaxy(gameId) on onCreate.
@@ -49,9 +48,29 @@ type WarpEngageMsg = {
 const TICK_HZ = 20;
 const TICK_MS = 1000 / TICK_HZ;
 
-/** Used by autobrake skip-check; mirrors AUTOPILOT_ARRIVAL_LY/ORBITAL_DOCK_RANGE_LY. */
-void AUTOPILOT_ARRIVAL_LY;
-void ORBITAL_DOCK_RANGE_LY;
+/** Sync a stable subset of legacy Player fields into the Colyseus
+ *  Player so the iframe can read them via the schema stream. Pass 3
+ *  keeps the legacy MCP tool handlers (warp_to / set_target / etc.)
+ *  mutating the in-memory galaxy record; this function bridges those
+ *  mutations into Colyseus state. Conversely, motion fields computed
+ *  in the tick get written back to legacy so get_state and the Mind
+ *  agent see the authoritative ship position. */
+type LegacyPlayer = {
+  position: [number, number, number];
+  heading: [number, number, number];
+  throttle: number;
+  targetId: string | null;
+  warpEngaged: boolean;
+  dockedOrbitalId: string | null;
+  faceRequestTs?: number;
+  stopRequestTs?: number;
+};
+
+function findLegacyPlayer(gameId: string, playerId: string): LegacyPlayer | undefined {
+  const galaxy = getGalaxies().get(gameId);
+  if (!galaxy) return undefined;
+  return galaxy.players.get(playerId) as LegacyPlayer | undefined;
+}
 
 export class StarRoom extends Room<{ state: World }> {
   /** Per-session latest-input buffer. Replaced on each `input` message
@@ -73,10 +92,18 @@ export class StarRoom extends Room<{ state: World }> {
     this.setPatchRate(TICK_MS);
     this.setSimulationInterval((dtMs) => this.tick(dtMs / 1000), TICK_MS);
 
-    // Latest-wins input intent stream. 60 Hz from the client is fine —
-    // we only sample the latest before each 20 Hz tick.
+    // Input intent stream. Absolute fields (throttle) are latest-wins;
+    // delta fields (yawDelta / pitchDelta) accumulate between ticks so
+    // a rapid drag at >20 Hz doesn't lose any frames worth of motion.
     this.onMessage("input", (client, msg: InputMsg) => {
-      this.inputs.set(client.sessionId, msg);
+      const cur = this.inputs.get(client.sessionId);
+      if (!cur) {
+        this.inputs.set(client.sessionId, { ...msg });
+        return;
+      }
+      if (msg.throttle != null) cur.throttle = msg.throttle;
+      if (msg.yawDelta != null) cur.yawDelta = (cur.yawDelta ?? 0) + msg.yawDelta;
+      if (msg.pitchDelta != null) cur.pitchDelta = (cur.pitchDelta ?? 0) + msg.pitchDelta;
     });
 
     // Discrete one-shot: engage warp toward a target. Pass 2 takes the
@@ -118,6 +145,27 @@ export class StarRoom extends Room<{ state: World }> {
     p.shipName = options.shipName ?? "(unnamed)";
     p.shipClass = options.shipClass ?? "GCU";
     p.systemId = this.state.gameId; // Placeholder until per-system sharding lands.
+
+    // Hydrate motion + intent from the legacy galaxy record so the iframe
+    // resumes from the same spot it left off (e.g. across a reload that
+    // happened mid-warp). If no legacy player exists yet (fresh spawn),
+    // server.ts's start_starship will populate it; we'll sync on the
+    // next tick.
+    const legacy = findLegacyPlayer(this.state.gameId, p.playerId);
+    if (legacy) {
+      p.posX = legacy.position[0];
+      p.posY = legacy.position[1];
+      p.posZ = legacy.position[2];
+      // Legacy stores heading as a forward unit vector — convert back to
+      // yaw/pitch (inverse of forwardFromYawPitch).
+      const [hx, hy, hz] = legacy.heading;
+      p.yaw = Math.atan2(hx, -hz);
+      p.pitch = Math.asin(Math.max(-1, Math.min(1, hy)));
+      p.throttle = legacy.throttle ?? 0;
+      p.targetId = legacy.targetId ?? "";
+      p.warpEngaged = !!legacy.warpEngaged;
+      p.dockedOrbitalId = legacy.dockedOrbitalId ?? "";
+    }
     this.state.players.set(client.sessionId, p);
     console.log(`[StarRoom ${this.roomId}] join ${client.sessionId} (playerId=${p.playerId})`);
   }
@@ -135,22 +183,67 @@ export class StarRoom extends Room<{ state: World }> {
   }
 
   /** One simulation tick. dt is in seconds. Pure-math via
-   *  @genui/star-sim's stepWarpAlignment + a tiny position integrator. */
+   *  @genui/star-sim's stepWarpAlignment + a tiny position integrator.
+   *
+   *  Pass 3b bridge: at the START of each tick, sync READ-side fields
+   *  from the legacy galaxy record (targetId / warpEngaged /
+   *  dockedOrbitalId — these are mutated by MCP tools like warp_to and
+   *  set_target). At the END, write the computed motion fields back so
+   *  legacy readers (get_state, ask_mind, persistence) see authoritative
+   *  positions. */
   private tick(dt: number) {
     this.state.tick += 1;
+    const galaxy = getGalaxies().get(this.state.gameId);
 
     this.state.players.forEach((p: Player, sessionId: string) => {
-      // Apply latest input.
+      const legacy = galaxy?.players.get(p.playerId) as LegacyPlayer | undefined;
+
+      // --- READ from legacy (intent fields mutated by MCP tools) ---
+      if (legacy) {
+        const lt = legacy.targetId ?? "";
+        if (lt !== p.targetId) {
+          p.targetId = lt;
+          // New target → clear any stale warp target cache so the next
+          // warp_engage resolves fresh.
+          this.warpTargets.delete(sessionId);
+        }
+        if (legacy.warpEngaged !== p.warpEngaged) {
+          p.warpEngaged = legacy.warpEngaged;
+          if (legacy.warpEngaged && p.targetId && !this.warpTargets.has(sessionId)) {
+            // Server-side warp engage — resolve the target position now.
+            const pos = resolveTargetPosition(p.targetId, galaxy);
+            if (pos) {
+              this.warpTargets.set(sessionId, {
+                targetId: p.targetId,
+                targetPos: pos.pos,
+                isOrbital: pos.isOrbital,
+              });
+            }
+          }
+        }
+        p.dockedOrbitalId = legacy.dockedOrbitalId ?? "";
+      }
+
+      // --- Apply input intent ---
+      // Throttle is absolute (slider position); yawDelta / pitchDelta
+      // are accumulated rotation amounts since the previous tick. After
+      // applying deltas we zero them so they don't keep firing each
+      // tick; throttle stays sticky between ticks until the next slider
+      // change overwrites it.
       const intent = this.inputs.get(sessionId);
       if (intent) {
         if (intent.throttle != null) p.throttle = clamp01(intent.throttle);
-        if (intent.yawDelta) p.yaw = normalizeAngle(p.yaw + intent.yawDelta);
+        if (intent.yawDelta) {
+          p.yaw = normalizeAngle(p.yaw + intent.yawDelta);
+          intent.yawDelta = 0;
+        }
         if (intent.pitchDelta) {
           p.pitch = clamp(p.pitch + intent.pitchDelta, -Math.PI / 2 + 0.05, Math.PI / 2 - 0.05);
+          intent.pitchDelta = 0;
         }
       }
 
-      // Warp autopilot — Phase 1/2 alignment via the shared physics module.
+      // --- Warp autopilot — Phase 1/2 from @genui/star-sim ---
       if (p.warpEngaged) {
         const wt = this.warpTargets.get(sessionId);
         if (wt) {
@@ -169,11 +262,17 @@ export class StarRoom extends Room<{ state: World }> {
           if (result.arrived) {
             p.warpEngaged = false;
             this.warpTargets.delete(sessionId);
+            // Reflect arrival into legacy so the iframe's poll observes
+            // warpEngaged=false too (target-info pane clears WARPING).
+            if (legacy) {
+              legacy.warpEngaged = false;
+              legacy.throttle = 0;
+            }
           }
         }
       }
 
-      // Integrate position from throttle + current heading.
+      // --- Integrate position from throttle + heading ---
       const speed = speedFromThrottle(p.throttle);
       if (speed > 0) {
         const fwd = forwardFromYawPitch(p.yaw, p.pitch);
@@ -181,8 +280,49 @@ export class StarRoom extends Room<{ state: World }> {
         p.posY += fwd.y * speed * dt;
         p.posZ += fwd.z * speed * dt;
       }
+
+      // --- WRITE motion back to legacy so get_state / ask_mind / etc.
+      //     see authoritative state without rewriting every reader. ---
+      if (legacy) {
+        legacy.position = [p.posX, p.posY, p.posZ];
+        const fwd = forwardFromYawPitch(p.yaw, p.pitch);
+        legacy.heading = [fwd.x, fwd.y, fwd.z];
+        legacy.throttle = p.throttle;
+        // Don't overwrite legacy.targetId / .warpEngaged here — they're
+        // the READ-side. Their write-path is the MCP tools themselves.
+        // (Exception: arrival above clears legacy.warpEngaged so the
+        // iframe's poll sees the new state on its next 200 ms cycle.)
+      }
     });
   }
+}
+
+/** Resolve a target id to a 3D position (light-years). Returns null if
+ *  unknown. For Pass 3b: stars resolve via STAR_INDEX; orbitals via the
+ *  galaxy's orbitals list; planets fall back to their PARENT star's
+ *  position (close enough — planets are sub-AU from their star and
+ *  the autopilot arrival range is 1 AU). Pass 4 will compute live
+ *  orbital phase server-side via @genui/star-sim. */
+function resolveTargetPosition(
+  targetId: string,
+  galaxy: { orbitals: Array<{ id: string; position: [number, number, number] }> } | undefined,
+): { pos: [number, number, number]; isOrbital: boolean } | null {
+  if (!targetId) return null;
+  if (targetId.startsWith("orbital:") && galaxy) {
+    const oid = targetId.slice("orbital:".length);
+    const o = galaxy.orbitals.find((x) => x.id === oid);
+    return o ? { pos: o.position, isOrbital: true } : null;
+  }
+  if (targetId.startsWith("planet:")) {
+    const rest = targetId.slice("planet:".length);
+    const sep = rest.indexOf("::");
+    const starId = sep >= 0 ? rest.slice(0, sep) : rest;
+    const s = STAR_INDEX[starId];
+    if (s) return { pos: s.position, isOrbital: false };
+    return null;
+  }
+  const s = STAR_INDEX[targetId];
+  return s ? { pos: s.position, isOrbital: false } : null;
 }
 
 function clamp01(x: number): number {

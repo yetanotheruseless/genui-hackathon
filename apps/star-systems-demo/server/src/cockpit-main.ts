@@ -803,9 +803,14 @@ canvas.addEventListener("pointermove", (e) => {
   // sky under your cursor stays under your cursor while you drag. Both
   // axes consistent — drag right pulls the world right (camera turns
   // left); drag down pulls the world down (camera tilts up).
-  ship.yaw   -= dx * 0.004;
-  ship.pitch += dy * 0.004;
-  ship.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, ship.pitch));
+  const yawDelta = -dx * 0.004;
+  const pitchDelta = dy * 0.004;
+  // Pass 3b: apply locally first (anti snap-back — server reflects the
+  // same delta back via the next snapshot but we don't want to wait one
+  // round-trip per drag pixel); also send as intent to the server.
+  ship.yaw += yawDelta;
+  ship.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, ship.pitch + pitchDelta));
+  sendIntent({ yawDelta, pitchDelta });
 });
 // Single click in the 3D viewport → set_target only (lock the reticle).
 // Double click → align (set_target + face_target). Warp is no longer
@@ -830,10 +835,14 @@ canvas.addEventListener("dblclick", (e) => {
 });
 
 throttleEl.addEventListener("input", () => {
-  ship.throttle = parseFloat(throttleEl.value);
+  const v = parseFloat(throttleEl.value);
+  ship.throttle = v;
   // User-driven throttle change cancels autopilot. Target stays selected
   // (HUD continues to show it); click the same star again to re-engage.
   if (ship.warpEngaged) ship.warpEngaged = false;
+  // Pass 3b: send the throttle change as a Colyseus intent so the
+  // server's authoritative tick uses it. Server is the integrator now.
+  sendIntent({ throttle: v });
 });
 warpBtn.addEventListener("click", () => {
   // Re-engage warp on the currently locked target. ship.targetId is
@@ -1187,6 +1196,13 @@ function tickOtherShipsFromColyseus() {
   }
 }
 
+/** Send a single input intent over the Colyseus room. No-op if not
+ *  connected. Latest-wins on the server. */
+function sendIntent(intent: { throttle?: number; yawDelta?: number; pitchDelta?: number }) {
+  if (!colyseusRoom) return;
+  try { colyseusRoom.send("input", intent); } catch {}
+}
+
 /** Drift logger — fires at ~1 Hz. Lets us eyeball whether the local
  *  iframe sim and the server's authoritative sim are producing
  *  matching positions for OUR ship. */
@@ -1221,13 +1237,15 @@ function tick() {
     -Math.cos(ship.pitch) * Math.cos(ship.yaw),
   );
 
-  if (ship.warpEngaged && ship.targetId) {
+  // Pass 3b: Phase 1/2 alignment + position integration now runs on
+  // the server in StarRoom.tick (apps/star-systems-demo/server/src/
+  // room.ts). When Colyseus is connected, the iframe just renders
+  // what the server's authoritative snapshot says. When Colyseus is
+  // offline (Pass-2-style fallback), keep running the legacy Phase 1/2
+  // locally so single-player still works without the multiplayer stack.
+  if (!colyseusRoom && ship.warpEngaged && ship.targetId) {
     const target = resolveTargetPosition(ship.targetId);
     if (target) {
-      // Phase 1 / Phase 2 alignment math is in @genui/star-sim. Pure
-      // function returns new yaw/pitch/throttle + an `arrived` flag.
-      // Side effects (DOM throttle slider, server stop_engines, observe,
-      // dock_orbital) stay here — they're not pure.
       const result = stepWarpAlignment({
         shipPos: { x: ship.position.x, y: ship.position.y, z: ship.position.z },
         shipFwd: { x: fwd.x, y: fwd.y, z: fwd.z },
@@ -1240,21 +1258,13 @@ function tick() {
       ship.pitch = result.pitch;
       ship.throttle = result.throttle;
       throttleEl.value = result.throttle.toString();
-
       if (result.arrived) {
         ship.warpEngaged = false;
-        // Tell the server the warp is done — clears player.warpEngaged
-        // so the get_state poll doesn't keep re-engaging us next frame
-        // (and so the target-info pane's WARPING badge clears). One
-        // call per arrival per target, latched by lastArrivedTargetId.
         if (gameId && playerId && lastArrivedTargetId !== ship.targetId) {
           lastArrivedTargetId = ship.targetId;
           void callTool(pane.app, "stop_engines", { gameId, playerId }).catch(() => {});
         }
         if (target.isOrbital) {
-          // Auto-dock on arrival. Server is the source of truth — it
-          // re-checks the range and sets player.dockedOrbitalId, which
-          // the bridge pane reads to render the description card.
           if (gameId && playerId && ship.targetId) {
             const oid = ship.targetId.slice("orbital:".length);
             void callTool(pane.app, "dock_orbital", { gameId, playerId, orbitalId: oid });
@@ -1266,6 +1276,35 @@ function tick() {
           }
         }
       }
+    }
+  }
+
+  // Pass 3b: when Colyseus is driving the sim, lerp our ship's
+  // position toward the server's authoritative snapshot each frame.
+  // Yaw/pitch/throttle reflect server only when the iframe ISN'T
+  // mid-drag (anti snap-back — the local pointer drag deltas were
+  // already sent as intents and will land in the NEXT server snapshot,
+  // but until then we keep the local optimistic values).
+  if (colyseusRoom && serverSelf) {
+    const k = 0.35;
+    ship.position.x = THREE.MathUtils.lerp(ship.position.x, serverSelf.posX, k);
+    ship.position.y = THREE.MathUtils.lerp(ship.position.y, serverSelf.posY, k);
+    ship.position.z = THREE.MathUtils.lerp(ship.position.z, serverSelf.posZ, k);
+    if (!dragging) {
+      ship.yaw = serverSelf.yaw;
+      ship.pitch = serverSelf.pitch;
+    }
+    // Throttle: only adopt the server's value if the user isn't
+    // currently dragging the slider — same anti snap-back idea.
+    // (throttleEl doesn't carry a "currently being scrubbed" state
+    // out of the box; in practice the auto-update is fine since the
+    // slider sends an intent on every input.)
+    if (Math.abs(serverSelf.throttle - ship.throttle) > 0.005) {
+      ship.throttle = serverSelf.throttle;
+      throttleEl.value = ship.throttle.toString();
+    }
+    if (serverSelf.warpEngaged !== ship.warpEngaged) {
+      ship.warpEngaged = serverSelf.warpEngaged;
     }
   }
 
@@ -1618,8 +1657,13 @@ function tick() {
     layers.icon.scale.set(r, r, 1);
   }
 
-  const speed = speedFromThrottle(ship.throttle);
-  if (speed > 0) ship.position.addScaledVector(fwd, speed * dt);
+  // Pass 3b: position integration runs server-side now. The lerp
+  // toward serverSelf earlier in this tick already updated ship.position.
+  // When Colyseus is offline, the iframe owns integration (fallback).
+  if (!colyseusRoom) {
+    const speed = speedFromThrottle(ship.throttle);
+    if (speed > 0) ship.position.addScaledVector(fwd, speed * dt);
+  }
 
   camera.position.copy(ship.position);
   camera.lookAt(ship.position.clone().add(fwd));
@@ -1822,18 +1866,24 @@ requestAnimationFrame(tick);
 // --- server polling ---
 poll(200, async () => {
   if (!gameId || !playerId) return;
-  // targetId / warpEngaged are server-owned (only `warp_to` sets them).
-  // Pushing them from here would clobber a captain's warp_to between the
-  // server write and our next get_state read.
-  await callTool(pane.app, "sync_state", {
-    gameId, playerId,
-    state: {
-      position: [ship.position.x, ship.position.y, ship.position.z],
-      heading: [Math.sin(ship.yaw), Math.sin(ship.pitch), -Math.cos(ship.yaw)],
-      throttle: ship.throttle,
-      hoveredId: ship.hoveredId,
-    },
-  });
+  // Pass 3b: sync_state push is gone — the StarRoom tick is the
+  // integrator now, mirroring motion fields back to the legacy galaxy
+  // record. get_state still drives non-motion UI (targetId,
+  // warpEngaged, dockedOrbitalId, orbitals list, public chat, log).
+  // The Colyseus state stream covers position + yaw/pitch + throttle.
+  // If Colyseus is offline, fall back to pushing sync_state so single-
+  // player mode without Colyseus still works (Pass-2-style topology).
+  if (!colyseusRoom) {
+    await callTool(pane.app, "sync_state", {
+      gameId, playerId,
+      state: {
+        position: [ship.position.x, ship.position.y, ship.position.z],
+        heading: [Math.sin(ship.yaw), Math.sin(ship.pitch), -Math.cos(ship.yaw)],
+        throttle: ship.throttle,
+        hoveredId: ship.hoveredId,
+      },
+    });
+  }
   const state = await callTool<any>(pane.app, "get_state", { gameId, playerId });
   if (state?.targetId && state.targetId !== lastSyncedTargetId) {
     lastSyncedTargetId = state.targetId;
