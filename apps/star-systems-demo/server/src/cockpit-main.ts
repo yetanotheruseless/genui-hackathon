@@ -1162,9 +1162,18 @@ async function connectColyseus(shipName: string, shipClass: string) {
       }
       // OTHER player joined — create or attach a sprite for them.
       ensureOtherShipSprite(sessionId);
-      $(player).onChange(() => {
-        applyOtherShipUpdate(sessionId, player);
-      });
+      // Seed the snapshot buffer with the initial position so the
+      // sprite doesn't sit at (0,0,0) before the first onChange fires.
+      applyOtherShipUpdate(sessionId, player);
+      // Listen on each motion field. The schema 4.x docs say
+      // `$(player).onChange(...)` fires on direct property changes,
+      // but realtime-tanks-demo uses per-field `listen()` and that's
+      // the pattern verified in the research — known to fire on every
+      // delta patch. Belt-and-suspenders: register both.
+      $(player).onChange(() => applyOtherShipUpdate(sessionId, player));
+      $(player).listen("posX", () => applyOtherShipUpdate(sessionId, player));
+      $(player).listen("posY", () => applyOtherShipUpdate(sessionId, player));
+      $(player).listen("posZ", () => applyOtherShipUpdate(sessionId, player));
     });
     $(room.state).players.onRemove((_player: ServerPlayer, sessionId: string) => {
       if (sessionId === colyseusSessionId) {
@@ -1221,12 +1230,30 @@ function ensureOtherShipSprite(sessionId: string) {
   otherShipSprites.set(sessionId, { sprite, snapshots: [] });
 }
 
+// Debug counter — logs once per second so we can verify the
+// Colyseus callbacks are firing at the expected ~20 Hz rate. If this
+// shows <20/s, the smoothing won't have enough samples to work.
+let _applyCount = 0;
+let _lastApplyLogAt = 0;
+
 function applyOtherShipUpdate(sessionId: string, p: ServerPlayer) {
   const entry = otherShipSprites.get(sessionId);
   if (!entry) return;
+  // Skip if the position hasn't changed since the last snapshot —
+  // happens when both onChange + listen fire on the same patch, OR
+  // when a patch arrives with no motion delta.
+  const last = entry.snapshots[entry.snapshots.length - 1];
+  if (last && last.x === p.posX && last.y === p.posY && last.z === p.posZ) return;
   const snap: ShipSnapshot = { t: performance.now(), x: p.posX, y: p.posY, z: p.posZ };
   entry.snapshots.push(snap);
   if (entry.snapshots.length > SNAPSHOT_BUFFER_SIZE) entry.snapshots.shift();
+  _applyCount++;
+  const nowMs = performance.now();
+  if (nowMs - _lastApplyLogAt >= 1000) {
+    console.log(`[ship-snap] applied ${_applyCount} updates in last ${(nowMs - _lastApplyLogAt).toFixed(0)} ms across ${otherShipSprites.size} ships`);
+    _applyCount = 0;
+    _lastApplyLogAt = nowMs;
+  }
   // Keep the playerId → position map fresh so ship: targets resolve
   // against the live position. The schema's playerId is our stable
   // cross-room identity used by overview-main as the row id.
@@ -1551,7 +1578,23 @@ function tick() {
   // Update every planet's world position from its orbital phase. Hide
   // planets whose star is far enough that the planet would subtend less
   // than ~0.3 px — saves draw calls for the ~25 planets in the catalog.
-  const tNow = performance.now() / 1000;
+  //
+  // Use Date.now() (wall clock, NTP-synced across machines) instead of
+  // performance.now() (per-tab epoch). With performance.now() two
+  // clients compute different orbital phases at the same real moment
+  // because their iframes loaded at different timestamps — so Player B
+  // sees Player A's ship reach a planet before A's own camera does,
+  // since A's locally-computed Jupiter sits at a different coordinate
+  // than B's locally-computed Jupiter. Date.now() puts every client on
+  // the same clock; NTP drift (~tens of ms) is invisible at our
+  // phase speeds (Jupiter's is ~0.01 rad/s).
+  //
+  // PLANET_EPOCH_MS bounds the phase magnitude for float precision:
+  // raw Date.now()/1000 is ~1.7e9 right now, which still gives correct
+  // cos/sin but eats precision. With a recent epoch subtraction we
+  // stay well under 1e8 phase radians even years from now.
+  const PLANET_EPOCH_MS = 1746000000000; // 2025-04-30 UTC
+  const tNow = (Date.now() - PLANET_EPOCH_MS) / 1000;
   const canvasH = canvas.clientHeight || 600;
   // Geometry helpers — minimum world-space radius that subtends N px at
   // a given distance, given the 70° vertical FOV (tan(35°) ≈ 0.7). Used
