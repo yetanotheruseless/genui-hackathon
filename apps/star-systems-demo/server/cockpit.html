@@ -84,10 +84,45 @@
 
       .hud-bottom { position:absolute; left:0; right:0; bottom:0; padding:6px 10px; display:flex; gap:12px; align-items:center; background:rgba(4,6,10,.75); border-top:1px solid var(--line); }
       .throttle-wrap { flex:1; display:flex; align-items:center; gap:8px; }
-      .throttle-label { color:var(--dim); width:90px; }
+      .throttle-label { color:var(--dim); width:120px; white-space:nowrap; }
       .throttle-label .speed { color:var(--accent); font-weight:600; }
       input[type="range"] {
         flex:1; accent-color: var(--accent); height: 4px;
+      }
+      /* Custom-rendered detent ticks on the throttle slider. Browser
+         <datalist> tickmarks only render reliably for labeled options
+         and look subtle, so we overlay our own at exact slider %s.
+         W1 / W5 / W9 are primary (bright white); the in-between
+         detents are gray secondary marks. */
+      .throttle-track { position:relative; flex:1; display:flex; align-items:center; }
+      .throttle-track input[type="range"] { width:100%; position:relative; z-index:2; background:transparent; }
+      .throttle-marks {
+        position:absolute; left:0; right:0; top:50%; height:14px;
+        transform:translateY(-50%); pointer-events:none; z-index:1;
+      }
+      .throttle-marks .mark {
+        position:absolute; top:1px; bottom:1px; width:1px;
+        background:rgba(180,180,180,0.4);
+        transform:translateX(-50%);
+      }
+      .throttle-marks .mark.prim {
+        background:rgba(240,240,240,0.85); width:2px;
+      }
+      /* Dim tick — flags physical-unit transitions (1 km/s, 1 Mm/s).
+         Darker than the warp secondaries so the visual hierarchy is
+         bright (W1/W5/W9) → medium (warp secondaries + c) → dim
+         (km, Mm). */
+      .throttle-marks .mark.dim {
+        background:rgba(120,120,120,0.4);
+      }
+      .throttle-marks .mark.dim .lbl {
+        color:rgba(140,140,140,0.7);
+      }
+      .throttle-marks .mark .lbl {
+        position:absolute; top:14px; left:50%;
+        transform:translateX(-50%);
+        font-size:9px; color:rgba(220,220,220,0.7);
+        letter-spacing:0.05em; white-space:nowrap;
       }
       .label-block { display:flex; flex-direction:column; line-height:1.3; }
       .label-block .k { color:var(--dim); font-size:10px; text-transform:uppercase; letter-spacing:.1em; }
@@ -124,23 +159,22 @@
          Combines a soft vignette tint with a horizontal-streak repeating
          gradient that scrolls vertically; cheap, GPU-friendly, reads as
          "stretched space" without going full Star-Wars hyperspace. */
+      /* The opacity is set by cockpit-main.ts as a function of warp
+         factor — fades in from warp 1 (very faint) to warp 9 (full
+         shimmer) instead of a binary on/off above warp 7. The shimmer
+         animation always runs; at opacity 0 it's invisible regardless. */
       #warp-overlay {
         position: absolute;
         inset: 0;
         pointer-events: none;
         opacity: 0;
-        transition: opacity 350ms ease-in-out;
+        transition: opacity 200ms linear;
         background:
           radial-gradient(ellipse at center, transparent 28%, rgba(122,215,255,0.08) 65%, rgba(156,108,255,0.18) 100%),
           repeating-linear-gradient(0deg, transparent 0px, transparent 5px, rgba(122,215,255,0.04) 5px, rgba(122,215,255,0.04) 6px);
         mix-blend-mode: screen;
         background-size: 100% 100%, 100% 24px;
         animation: warp-shimmer 0.9s linear infinite;
-        animation-play-state: paused;
-      }
-      #warp-overlay.active {
-        opacity: 1;
-        animation-play-state: running;
       }
       @keyframes warp-shimmer {
         from { background-position: 0 0, 0 0; }
@@ -177,10 +211,41 @@
       <div class="hud-bottom">
         <div class="throttle-wrap">
           <div class="throttle-label">throttle <span class="speed" id="speed-readout">0.00 c</span></div>
-          <input type="range" id="throttle" min="0" max="1" step="0.01" value="0" />
+          <!-- Throttle slider with custom-overlay detent marks.
+               Layout math: impulse zone = bottom 2/3 of slider; warp
+               detents W1..W9 sit in the top 1/3 spaced evenly:
+                 W1 = 0.6667, W2 = 0.7083, ... W5 = 0.8333, ... W9 = 1.0.
+               W1/W5/W9 are labeled primary marks; the rest are
+               unlabeled secondary marks. Positions are slider percent
+               since the slider itself spans the same container. -->
+          <div class="throttle-track">
+            <input type="range" id="throttle" min="0" max="1" step="0.001" value="0" />
+            <!-- Marker positions get populated by cockpit-main.ts on
+                 load + resize. `data-slider-value` is the slider
+                 value (0..1) that each tick represents; JS converts
+                 that to a pixel offset compensated for the thumb's
+                 half-width inset so the marker aligns with the
+                 thumb's actual center position at that value. -->
+            <div class="throttle-marks" aria-hidden="true">
+              <span class="mark dim"  data-slider-value="0.01109"><span class="lbl">km</span></span>
+              <span class="mark dim"  data-slider-value="0.03506"><span class="lbl">Mm</span></span>
+              <span class="mark dim"  data-slider-value="0.11090"><span class="lbl">Gm</span></span>
+              <span class="mark"      data-slider-value="0.30940"><span class="lbl">c</span></span>
+              <span class="mark prim" data-slider-value="0.66670"><span class="lbl">W1</span></span>
+              <span class="mark"      data-slider-value="0.70833"></span>
+              <span class="mark"      data-slider-value="0.75000"></span>
+              <span class="mark"      data-slider-value="0.79167"></span>
+              <span class="mark prim" data-slider-value="0.83333"><span class="lbl">W5</span></span>
+              <span class="mark"      data-slider-value="0.87500"></span>
+              <span class="mark"      data-slider-value="0.91667"></span>
+              <span class="mark"      data-slider-value="0.95833"></span>
+              <span class="mark prim" data-slider-value="1"      ><span class="lbl">W9</span></span>
+            </div>
+          </div>
         </div>
         <div class="label-block"><span class="k">heading</span><span class="v" id="heading-readout">—</span></div>
         <button id="warp-btn" style="background:#1a2436;color:var(--accent);border:1px solid var(--accent);padding:5px 10px;border-radius:3px;cursor:pointer;font:inherit;">warp</button>
+        <button id="hud-stop-btn" title="Cut throttle and disengage warp" style="background:#1a2436;color:#ff6b6b;border:1px solid #ff6b6b;padding:5px 10px;border-radius:3px;cursor:pointer;font:inherit;">stop</button>
       </div>
     </div>
     <script type="module" src="/src/cockpit-main.ts"></script>

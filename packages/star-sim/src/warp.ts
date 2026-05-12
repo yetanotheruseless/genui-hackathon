@@ -31,6 +31,13 @@ export type WarpAlignmentInput = {
   targetPos: Vec3;
   /** True for Orbitals (uses ORBITAL_DOCK_RANGE_LY); false for stars. */
   isOrbital: boolean;
+  /** Target body radius in light-years. Added to the base arrival
+   *  range so the ship stops 1 AU from the SURFACE rather than 1 AU
+   *  from the center — critical for supergiants where the radius
+   *  itself can exceed 1 AU and the old "from center" check parked
+   *  the ship inside the photosphere. Defaults to 0 (point target,
+   *  e.g. ships and orbitals). */
+  targetRadiusLy?: number;
   /** Tick delta in seconds. */
   dt: number;
 };
@@ -73,7 +80,8 @@ export function stepWarpAlignment(input: WarpAlignmentInput): WarpAlignmentOutpu
   );
   const angleErr = Math.acos(cosErr);
 
-  const arrivalRange = input.isOrbital ? ORBITAL_DOCK_RANGE_LY : AUTOPILOT_ARRIVAL_LY;
+  const baseArrival = input.isOrbital ? ORBITAL_DOCK_RANGE_LY : AUTOPILOT_ARRIVAL_LY;
+  const arrivalRange = baseArrival + (input.targetRadiusLy ?? 0);
 
   if (angleErr > ALIGN_TOLERANCE) {
     // Phase 1: lerp current fwd toward target dir, renormalize.
@@ -96,8 +104,26 @@ export function stepWarpAlignment(input: WarpAlignmentInput): WarpAlignmentOutpu
   }
 
   // Phase 2: snap-track + warp throttle ramp.
-  const targetThrottle = autopilotTargetThrottle(dist);
-  const newThrottle = input.shipThrottle * 0.85 + targetThrottle * 0.15;
+  //
+  // Lerp is asymmetric. On accel (target > current) keep the gentle
+  // 0.85/0.15 ramp so the warp wind-up reads as "spinning up to
+  // light speed" instead of an instant jump. On decel (target <
+  // current) SNAP to target — with the cubic speed law a 0.85 lerp
+  // takes ~1.5 s to converge, during which the ship is still moving
+  // fast and overshoots well past the target. The distance-aware
+  // target (via autopilotTargetThrottle below) already gives a
+  // continuous, position-keyed deceleration curve, so snapping to
+  // it produces a smooth exponential slow-down without lag.
+  // Speed taper keys off distance-to-SURFACE, not distance-to-center
+  // — for big stars (Betelgeuse, R ~ 2 AU) center-distance would keep
+  // the ship at cruise speed until 1 AU outside the photosphere, then
+  // snap to zero with a ~0.5 AU overshoot. Surface-distance makes the
+  // approach feel the same regardless of target radius.
+  const distToSurface = Math.max(0, dist - (input.targetRadiusLy ?? 0));
+  const targetThrottle = autopilotTargetThrottle(distToSurface);
+  const newThrottle = targetThrottle < input.shipThrottle
+    ? targetThrottle
+    : input.shipThrottle * 0.85 + targetThrottle * 0.15;
   const arrived = dist <= arrivalRange;
   return {
     yaw: Math.atan2(dirX, -dirZ),

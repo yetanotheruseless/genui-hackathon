@@ -136,6 +136,11 @@ export function mindContextBlock(args: {
   recentObservations: { name: string; theme?: string }[];
   compendiumSummary: string;
   nearbyPlayers: { shipName: string; mindName: string; distance: number }[];
+  /** Stars within sensor range (~the autobrake's 100 AU + a margin so
+   *  the Mind sees what's "approaching" even before autobrake clamps).
+   *  Distance in light-years. The Mind uses this for proximity colour
+   *  ("we're closing on Sol", "a brown dwarf is off the port bow"). */
+  nearbyStars?: { name: string; spectralType?: string; distanceLy: number }[];
   orbitals: { name: string; near?: string; builderShip?: string }[];
   pinnedStars?: { id: string; name: string; spectralType: string; distanceLy?: number; planetSummary?: string }[];
 }): string {
@@ -163,6 +168,13 @@ export function mindContextBlock(args: {
     lines.push(`Other Culture vessels in your volume:`);
     for (const p of args.nearbyPlayers) {
       lines.push(`  - ${p.shipName} (Mind: ${p.mindName}) — ${p.distance.toFixed(2)} ly`);
+    }
+  }
+  if (args.nearbyStars && args.nearbyStars.length) {
+    lines.push(`Stars within sensor range right now:`);
+    for (const s of args.nearbyStars) {
+      const sp = s.spectralType ? ` (${s.spectralType})` : "";
+      lines.push(`  - ${s.name}${sp} — ${s.distanceLy.toFixed(4)} ly`);
     }
   }
   if (args.pinnedStars && args.pinnedStars.length) {

@@ -36,12 +36,19 @@ type StarLite = {
   planets: PlanetLite[];
 };
 
+/** Compact catalog tuple matching the server's brightStarsPayload:
+ *  [id, x, y, z, spectralClass, mag, radiusSolar]. Used for the
+ *  nearest-N catalog rows so the overview can target/warp to any of
+ *  the 109k HYG stars without building 109k rows in the DOM. */
+type CatalogStar = [string, number, number, number, string, number, number];
+
 type OverviewInit = {
   kind: "overview_init";
   gameId: string;
   playerId: string;
   ship: { name: string; class: string };
   stars: StarLite[];
+  catalogStars?: CatalogStar[];
 };
 
 type FilterKey = "all" | "star" | "planet" | "orbital" | "ship";
@@ -58,6 +65,17 @@ type Row = {
   distanceLy: number;    // computed each render from player position
   // Click action — server tool name + arguments. null for info-only rows.
   action: { tool: string; args: Record<string, unknown> } | null;
+  /** Star ID for expansion control (set on expandable star rows so the
+   *  caret-click handler knows which star to toggle in expandedStarIds).
+   *  Undefined on rows that don't have planets. */
+  expandableStarId?: string;
+  expanded?: boolean;
+  /** Visual indent flag for planet rows nested under their star. */
+  indent?: boolean;
+  /** Parent star id on planet rows — used by render() to gate
+   *  visibility against expandedStarIds (only in the ALL filter; the
+   *  PLANET filter shows every planet regardless). */
+  parentStarId?: string;
 };
 
 const shipNameEl = document.getElementById("ship-name") as HTMLElement;
@@ -69,7 +87,18 @@ const sortEls = document.querySelectorAll<HTMLTableCellElement>("[data-sort]");
 const pane = setupPaneApp("Culture Overview");
 let gameId = "";
 let playerId = "";
+/** How many nearest catalog (non-curated) stars to surface as rows.
+ *  Cap exists so the DOM doesn't get 109k <tr>s. Adjust if needed. */
+const CATALOG_MAX_ROWS = 60;
+/** Star ids whose planet rows are currently expanded under them.
+ *  Default = collapsed; clicking the ▶ caret on a star row toggles
+ *  membership and re-renders. Only stars with planets get a caret. */
+const expandedStarIds = new Set<string>();
 let stars: StarLite[] = [];
+let catalogStars: CatalogStar[] = [];
+/** Curated star ids — to skip from the catalog rows (curated have their
+ *  own full-fidelity rows with planets). */
+const curatedIds = new Set<string>();
 let playerPos: [number, number, number] = [0, 0, 0];
 let orbitals: Array<{
   id: string;
@@ -124,6 +153,9 @@ pane.initial.then((init) => {
   gameId = data.gameId;
   playerId = data.playerId;
   stars = data.stars ?? [];
+  catalogStars = data.catalogStars ?? [];
+  curatedIds.clear();
+  for (const s of stars) curatedIds.add(s.id);
   if (data.ship?.name) shipNameEl.textContent = data.ship.name;
   render();
 });
@@ -168,9 +200,14 @@ function formatDistance(ly: number): string {
 function buildRows(): Row[] {
   const rows: Row[] = [];
 
-  // Stars + their planets.
+  // Stars + their planets. Planets nest under their parent star and
+  // are gated by expandedStarIds — collapsed by default to keep the
+  // ALL view compact; the user clicks the ▶ caret on a star row to
+  // reveal its planets indented beneath.
   for (const s of stars) {
     const sd = distLy(s.position);
+    const hasPlanets = (s.planets?.length ?? 0) > 0;
+    const expanded = hasPlanets && expandedStarIds.has(s.id);
     rows.push({
       id: `star:${s.id}`,
       kind: "star",
@@ -180,11 +217,16 @@ function buildRows(): Row[] {
       distanceLy: sd,
       position: s.position,
       action: { tool: "warp_to", args: { gameId, playerId, objectId: s.id } },
+      expandableStarId: hasPlanets ? s.id : undefined,
+      expanded,
     });
-    // Planet rows — distance approximated by the star's distance (planets
-    // sit within ~tens of AU of their star, dwarfed by interstellar
-    // distances). Click locks the cockpit reticle on the planet via
-    // set_target (no warp — planets aren't valid warp_to destinations).
+    // Emit planet rows unconditionally; render() hides them under a
+    // collapsed parent for the ALL filter, but the "PLANETS" filter
+    // always shows every planet regardless of expansion. Distance is
+    // approximated by the parent star's distance (planets sit within
+    // ~tens of AU of their star, dwarfed by interstellar distances).
+    // Single-click sets the cockpit reticle on the planet via
+    // set_target — planets aren't valid warp_to destinations.
     for (const p of s.planets ?? []) {
       const orbitInfo = p.orbitAU ? ` · ${p.orbitAU.toFixed(2)} AU` : "";
       const planetTargetId = `planet:${s.id}::${p.name}`;
@@ -198,6 +240,43 @@ function buildRows(): Row[] {
         distanceLy: sd,
         position: s.position,
         action: { tool: "set_target", args: { gameId, playerId, targetId: planetTargetId } },
+        indent: true,
+        parentStarId: s.id,
+      });
+    }
+  }
+
+  // Catalog (HYG) stars — nearest N by distance from the ship.
+  // We don't dump all 109k into the table; instead we take the closest
+  // CATALOG_MAX_ROWS so the user can target/warp to any nearby HYG
+  // star without making the list unusable. As the ship moves, the
+  // nearest-N set updates automatically via the get_state poll.
+  if (catalogStars.length) {
+    const distances = new Array<{ idx: number; d: number }>(catalogStars.length);
+    let k = 0;
+    for (let i = 0; i < catalogStars.length; i++) {
+      const e = catalogStars[i];
+      if (curatedIds.has(e[0])) continue; // curated already have richer rows above
+      const dx = e[1] - playerPos[0];
+      const dy = e[2] - playerPos[1];
+      const dz = e[3] - playerPos[2];
+      distances[k++] = { idx: i, d: Math.hypot(dx, dy, dz) };
+    }
+    distances.length = k;
+    distances.sort((a, b) => a.d - b.d);
+    const cap = Math.min(CATALOG_MAX_ROWS, distances.length);
+    for (let j = 0; j < cap; j++) {
+      const { idx, d } = distances[j];
+      const e = catalogStars[idx];
+      rows.push({
+        id: `star:${e[0]}`,
+        kind: "star",
+        icon: "·",
+        name: e[0],
+        type: `${e[4]} · mag ${e[5].toFixed(1)}`,
+        distanceLy: d,
+        position: [e[1], e[2], e[3]],
+        action: { tool: "warp_to", args: { gameId, playerId, objectId: e[0] } },
       });
     }
   }
@@ -257,7 +336,18 @@ function render() {
     : `${formatDistance(Math.hypot(...playerPos))} from Sol`;
 
   const all = buildRows();
-  const filtered = filter === "all" ? all : all.filter((r) => r.kind === filter);
+  // Filter pipeline:
+  //   1. Kind filter (all/star/planet/orbital/ship).
+  //   2. Expansion gate (only in ALL): planet rows hidden unless their
+  //      parent star is in expandedStarIds. The PLANET filter shows
+  //      every planet regardless.
+  const filtered = all.filter((r) => {
+    if (filter !== "all" && r.kind !== filter) return false;
+    if (filter === "all" && r.kind === "planet" && r.parentStarId) {
+      return expandedStarIds.has(r.parentStarId);
+    }
+    return true;
+  });
   const sorted = sortRows(filtered);
 
   if (sorted.length === 0) {
@@ -275,10 +365,28 @@ function render() {
     const parent = r.parent ?? "";
     const normalizedId = r.id.startsWith("star:") ? r.id.slice("star:".length) : r.id;
     const isTarget = currentTargetId != null && normalizedId === currentTargetId;
-    const klass = `kind-${r.kind}${isTarget ? " target" : ""}`;
+    // Indent planet rows only on the ALL filter (where nesting under
+    // a star carries information). PLANETS filter shows planets flat
+    // since there's no hierarchy to convey — indenting there just
+    // makes them all start in the same shifted column for no reason.
+    const indentNow = r.indent && filter === "all";
+    const klass = `kind-${r.kind}${isTarget ? " target" : ""}${indentNow ? " indent" : ""}`;
+    // Caret on expandable star rows. data-expand-star carries the id
+    // so the click handler can toggle expandedStarIds without
+    // triggering the row's normal target action (stopPropagation in
+    // the handler). Use +/− glyphs rather than ▶/▼ — the right-
+    // pointing triangle is already the ship icon in the icon column,
+    // so a triangle caret next to the name would be confusing.
+    const caret = r.expandableStarId
+      ? `<span class="caret" data-expand-star="${escapeAttr(r.expandableStarId)}">${r.expanded ? "−" : "+"}</span>`
+      : "";
+    // Planet rows just get padding-left via .indent — no leading
+    // glyph. The previous └ bullet was visually noisy and also
+    // appeared confusingly in the PLANETS filter view.
+    const nameCell = `${caret}${escapeHtml(r.name)}`;
     html += `<tr class="${klass}" data-id="${escapeAttr(r.id)}">`
       + `<td class="icon">${r.icon}</td>`
-      + `<td class="name">${escapeHtml(r.name)}</td>`
+      + `<td class="name">${nameCell}</td>`
       + `<td class="kind">${escapeHtml(r.type)}</td>`
       + `<td class="parent">${escapeHtml(parent)}</td>`
       + `<td class="dist">${formatDistance(r.distanceLy)}</td>`
@@ -351,6 +459,18 @@ async function actionAlign(rowId: string) {
 }
 
 rowsEl.addEventListener("click", (e) => {
+  // Caret click — toggle expansion of the parent star and re-render.
+  // We don't let this fall through to the row-target action because
+  // the user is operating the disclosure widget, not picking a target.
+  const target = e.target as HTMLElement;
+  const expandStarId = target.dataset?.expandStar || target.closest<HTMLElement>("[data-expand-star]")?.dataset.expandStar;
+  if (expandStarId) {
+    e.stopPropagation();
+    if (expandedStarIds.has(expandStarId)) expandedStarIds.delete(expandStarId);
+    else expandedStarIds.add(expandStarId);
+    render();
+    return;
+  }
   const id = rowIdFromEvent(e);
   if (!id) return;
   if (pendingClickTimer != null) {

@@ -143,7 +143,7 @@ function SwitchVesselButton({ gameId }: { gameId: string }) {
       variant="ghost"
       size="sm"
       onClick={reset}
-      className="absolute top-3 right-[433px] h-6 px-2 text-[10px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground"
+      className="absolute top-2 right-[442px] h-6 px-2 text-[10px] font-mono uppercase tracking-widest text-muted-foreground hover:text-foreground"
       title="Clear the cached playerId and return to the lobby"
     >
       switch vessel

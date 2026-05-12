@@ -124,6 +124,33 @@
         cursor: pointer;
       }
       tbody tr:hover { background: rgba(122, 215, 255, 0.04); }
+      /* Expand/collapse caret on star rows that have planets. Tighter
+         hit target than the whole row so the row's normal target
+         click still works on the rest of the cell.
+         vertical-align:middle + line-height pins the +/− glyph to the
+         row's middle so it doesn't visually intrude on the header
+         bar above when the first row sits near the top of the table. */
+      .caret {
+        display: inline-block;
+        width: 1em;
+        margin-right: 4px;
+        opacity: 0.6;
+        cursor: pointer;
+        user-select: none;
+        vertical-align: middle;
+        line-height: 1;
+        font-size: 11px;
+      }
+      .caret:hover { opacity: 1; color: var(--accent); }
+      /* A few extra pixels of breathing room between the OVERVIEW
+         header bar and the first row, so the caret doesn't appear to
+         intrude into the header. */
+      tbody tr:first-child td { padding-top: 4px; }
+      /* Planet rows nested under their parent star — visual indent
+         via left-padding only. Applied (in render()) only on the ALL
+         filter where the hierarchy is meaningful; PLANETS filter
+         shows them flat. */
+      tbody tr.indent td.name { padding-left: 20px; }
 
       /* Locked-target row: stronger amber fill + bordered corner
          brackets reminiscent of the empty-state framing. The td.icon

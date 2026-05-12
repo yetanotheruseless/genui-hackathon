@@ -6,8 +6,13 @@
  * ENGINE_ARCHITECTURE.md "Schema design optimizations."
  *
  * Field type choices:
- *   posX/Y/Z   "number" (float64) — position in light-years; need full
- *               precision near a star (1 AU ≈ 1.6e-5 ly).
+ *   posX/Y/Z   "float64"          — position in light-years; need full
+ *               precision near a star (1 AU ≈ 1.6e-5 ly). Must be the
+ *               explicit "float64" type, NOT "number" — @colyseus/schema's
+ *               "number" type is a wire-format heuristic that auto-
+ *               downgrades to float32 if the round-trip is within 1e-4,
+ *               which at 1–4 ly magnitudes gives ~0.03 AU of position
+ *               quantization noise and a visibly jittery reticle.
  *   yaw/pitch  "float32"          — radians; 7 decimal digits is plenty.
  *   throttle   "float32"          — 0..1; same.
  *   systemId   "string"           — placeholder for future per-system
@@ -67,9 +72,9 @@ defineTypes(Player, {
   shipName: "string",
   shipClass: "string",
   systemId: "string",
-  posX: "number",
-  posY: "number",
-  posZ: "number",
+  posX: "float64",
+  posY: "float64",
+  posZ: "float64",
   yaw: "float32",
   pitch: "float32",
   throttle: "float32",

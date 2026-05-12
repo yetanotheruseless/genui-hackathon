@@ -19,13 +19,14 @@
 import { Client, Room } from "colyseus";
 import RAPIER from "@dimforge/rapier3d-deterministic-compat";
 import {
+  SOL_RADIUS_LY,
   speedFromThrottle,
   stepWarpAlignment,
 } from "../../../../packages/star-sim/src/index.js";
 import { Player } from "./state-player.js";
 import { World } from "./state-world.js";
 import { clearRoomAssignment, recordRoomAssignment } from "../persistence.js";
-import { getGalaxies, STAR_INDEX } from "../server.js";
+import { getGalaxies, resolveStar, STAR_INDEX } from "../server.js";
 
 /** Capsule radius approximating a Culture vessel hull for the Rapier
  *  body. Tiny in ly so it doesn't interact with the existing arrival
@@ -90,7 +91,15 @@ export class StarRoom extends Room<World> {
    *  table once MCP tool handlers route through us. */
   private warpTargets = new Map<
     string,
-    { targetId: string; targetPos: [number, number, number]; isOrbital: boolean }
+    {
+      targetId: string;
+      targetPos: [number, number, number];
+      isOrbital: boolean;
+      /** Physical radius in light-years; added to the autopilot's
+       *  arrival range so big stars are stopped 1 AU from the
+       *  SURFACE rather than 1 AU from the center. */
+      targetRadiusLy: number;
+    }
   >();
 
   /** Pass 4: Rapier physics world. Zero-gravity (we're in space). Holds
@@ -140,10 +149,15 @@ export class StarRoom extends Room<World> {
       const p = this.state.players.get(client.sessionId);
       if (!p) return;
       p.warpEngaged = true;
+      // Look up the radius server-side from the catalog so a
+      // client-supplied targetId still gets surface-aware arrival.
+      // Client-supplied targetPos is preserved (Pass 2 trust model).
+      const resolved = resolveTargetPosition(msg.targetId, getGalaxies().get(this.state.gameId));
       this.warpTargets.set(client.sessionId, {
         targetId: msg.targetId,
         targetPos: msg.targetPos,
         isOrbital: !!msg.isOrbital,
+        targetRadiusLy: resolved?.radiusLy ?? 0,
       });
     });
 
@@ -279,6 +293,7 @@ export class StarRoom extends Room<World> {
                 targetId: p.targetId,
                 targetPos: pos.pos,
                 isOrbital: pos.isOrbital,
+                targetRadiusLy: pos.radiusLy,
               });
             }
           }
@@ -290,22 +305,43 @@ export class StarRoom extends Room<World> {
       // Throttle is absolute (slider position); yawDelta / pitchDelta
       // are accumulated rotation amounts since the previous tick. After
       // applying deltas we zero them so they don't keep firing each
-      // tick; throttle stays sticky between ticks until the next slider
-      // change overwrites it.
+      // tick. Throttle was previously sticky-between-ticks, but that
+      // let a stale {throttle:0} from before warp engaged clobber the
+      // autopilot's ramp every tick — pinning warp at exactly 0.1425
+      // (= 0 × 0.85 + 0.95 × 0.15, the lerp's first step). Now we
+      // consume throttle one-shot just like the deltas: a slider
+      // motion sets it once, and the autopilot owns the field on every
+      // tick where the user didn't actively move the slider.
       const intent = this.inputs.get(sessionId);
       if (intent) {
-        if (intent.throttle != null) p.throttle = clamp01(intent.throttle);
+        if (intent.throttle != null) {
+          // Manual throttle input cancels the autopilot — the user is
+          // taking the wheel. (The cockpit's slider handler also
+          // disengages warp locally; mirror that authoritatively.)
+          if (p.warpEngaged) {
+            p.warpEngaged = false;
+            this.warpTargets.delete(sessionId);
+            if (legacy) legacy.warpEngaged = false;
+          }
+          p.throttle = clamp01(intent.throttle);
+          intent.throttle = undefined;
+        }
         if (intent.yawDelta) {
           p.yaw = normalizeAngle(p.yaw + intent.yawDelta);
           intent.yawDelta = 0;
         }
         if (intent.pitchDelta) {
-          p.pitch = clamp(p.pitch + intent.pitchDelta, -Math.PI / 2 + 0.05, Math.PI / 2 - 0.05);
+          // Authoritative pitch clamp must match the cockpit's
+          // MAX_PITCH (π/2 − 0.001 ≈ 89.94°); a tighter server clamp
+          // would snap the camera back to the smaller range on the
+          // next state sync, which the user sees as "looks 90° while
+          // dragging, jumps to 87° on release."
+          p.pitch = clamp(p.pitch + intent.pitchDelta, -Math.PI / 2 + 0.001, Math.PI / 2 - 0.001);
           intent.pitchDelta = 0;
         }
       }
 
-      // --- Warp autopilot — Phase 1/2 from @genui/star-sim ---
+// --- Warp autopilot — Phase 1/2 from @genui/star-sim ---
       if (p.warpEngaged) {
         const wt = this.warpTargets.get(sessionId);
         if (wt) {
@@ -316,6 +352,7 @@ export class StarRoom extends Room<World> {
             shipThrottle: p.throttle,
             targetPos: { x: wt.targetPos[0], y: wt.targetPos[1], z: wt.targetPos[2] },
             isOrbital: wt.isOrbital,
+            targetRadiusLy: wt.targetRadiusLy,
             dt,
           });
           p.yaw = result.yaw;
@@ -369,12 +406,18 @@ export class StarRoom extends Room<World> {
   }
 }
 
-/** Resolve a target id to a 3D position (light-years). Returns null if
- *  unknown. For Pass 3b: stars resolve via STAR_INDEX; orbitals via the
- *  galaxy's orbitals list; planets fall back to their PARENT star's
- *  position (close enough — planets are sub-AU from their star and
- *  the autopilot arrival range is 1 AU). Pass 4 will compute live
- *  orbital phase server-side via @genui/star-sim. */
+/** Resolve a target id to a 3D position (light-years) + physical
+ *  radius (light-years). Returns null if unknown. For Pass 3b: stars
+ *  resolve via STAR_INDEX; orbitals via the galaxy's orbitals list;
+ *  planets fall back to their PARENT star's position (close enough —
+ *  planets are sub-AU from their star and the autopilot arrival
+ *  range is 1 AU). Pass 4 will compute live orbital phase server-side
+ *  via @genui/star-sim.
+ *
+ *  radiusLy: physical radius of the target body, used by the warp
+ *  autopilot's arrival check so the ship stops 1 AU from the SURFACE
+ *  rather than 1 AU from the center. Ships and orbitals report 0
+ *  (they're points at this scale). */
 function resolveTargetPosition(
   targetId: string,
   galaxy:
@@ -383,12 +426,12 @@ function resolveTargetPosition(
         players: Map<string, { playerId: string; position: [number, number, number] }>;
       }
     | undefined,
-): { pos: [number, number, number]; isOrbital: boolean } | null {
+): { pos: [number, number, number]; isOrbital: boolean; radiusLy: number } | null {
   if (!targetId) return null;
   if (targetId.startsWith("orbital:") && galaxy) {
     const oid = targetId.slice("orbital:".length);
     const o = galaxy.orbitals.find((x) => x.id === oid);
-    return o ? { pos: o.position, isOrbital: true } : null;
+    return o ? { pos: o.position, isOrbital: true, radiusLy: 0 } : null;
   }
   if (targetId.startsWith("ship:") && galaxy) {
     // ship:<playerId> — find the target player in this galaxy and use
@@ -396,7 +439,7 @@ function resolveTargetPosition(
     // is plenty for "rendezvous near them" semantics.
     const pid = targetId.slice("ship:".length);
     for (const p of galaxy.players.values()) {
-      if (p.playerId === pid) return { pos: p.position, isOrbital: false };
+      if (p.playerId === pid) return { pos: p.position, isOrbital: false, radiusLy: 0 };
     }
     return null;
   }
@@ -404,12 +447,19 @@ function resolveTargetPosition(
     const rest = targetId.slice("planet:".length);
     const sep = rest.indexOf("::");
     const starId = sep >= 0 ? rest.slice(0, sep) : rest;
-    const s = STAR_INDEX[starId];
-    if (s) return { pos: s.position, isOrbital: false };
+    const s = resolveStar(starId);
+    // Planet positions still fall back to the parent star — orbital
+    // resolution comes in Pass 4. Use the star's radius for now so the
+    // ship doesn't park inside a supergiant.
+    if (s) return { pos: s.position, isOrbital: false, radiusLy: (s.radiusSolar ?? 1) * SOL_RADIUS_LY };
     return null;
   }
-  const s = STAR_INDEX[targetId];
-  return s ? { pos: s.position, isOrbital: false } : null;
+  // Bare star id: curated first, HYG catalog fallback via resolveStar.
+  // Previously this was STAR_INDEX-only, so warps to any of the 109k
+  // HYG ids would phase-1 align but never enter phase 2 — the autopilot
+  // couldn't find a target position to compute throttle against.
+  const s = resolveStar(targetId);
+  return s ? { pos: s.position, isOrbital: false, radiusLy: (s.radiusSolar ?? 1) * SOL_RADIUS_LY } : null;
 }
 
 function clamp01(x: number): number {

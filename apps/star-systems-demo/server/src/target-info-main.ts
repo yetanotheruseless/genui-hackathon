@@ -28,6 +28,12 @@ type StarLite = {
   spectralClass: string;
   spectralType: string;
   lumClass: string;
+  /** Solar radii (R☉). Always populated by server (exact when known,
+   *  else approxRadiusSolar fallback). */
+  radiusSolar?: number;
+  /** Distance from Sol in light-years — separate from "distance from
+   *  ship" which is computed live. Lets the pane show both. */
+  distanceLy?: number;
   planets: PlanetLite[];
 };
 type OrbitalLite = {
@@ -50,10 +56,17 @@ const btnWarp   = document.getElementById("btn-warp") as HTMLButtonElement;
 const btnStop   = document.getElementById("btn-stop") as HTMLButtonElement;
 const btnUnlock = document.getElementById("btn-unlock") as HTMLButtonElement;
 
+/** Compact tuple from server's brightStarsPayload — matches the
+ *  overview pane's CatalogStar. Lets us resolve HYG ids that aren't
+ *  in the curated `stars` array. */
+type CatalogStar = [string, number, number, number, string, number, number];
+
 const pane = setupPaneApp("Culture Target");
 let gameId = "";
 let playerId = "";
 let stars: StarLite[] = [];
+let catalogStars: CatalogStar[] = [];
+let catalogById: Map<string, CatalogStar> = new Map();
 let playerPos: [number, number, number] = [0, 0, 0];
 let orbitals: OrbitalLite[] = [];
 let nearbyPlayers: Array<{
@@ -65,19 +78,32 @@ let nearbyPlayers: Array<{
 }> = [];
 let targetId: string | null = null;
 let warpEngaged = false;
+/** Current authoritative throttle [0..1] from get_state. Drives the
+ *  STOP button enable state — STOP is usable any time the ship has
+ *  non-zero speed (impulse or warp), grayed out only at a standstill. */
+let throttle = 0;
 let lastKey = "";
 
 pane.initial.then((init) => {
-  const data = init as unknown as { gameId: string; playerId: string; stars?: StarLite[] };
+  const data = init as unknown as {
+    gameId: string;
+    playerId: string;
+    stars?: StarLite[];
+    catalogStars?: CatalogStar[];
+  };
   gameId = data.gameId;
   playerId = data.playerId;
   stars = data.stars ?? [];
+  catalogStars = data.catalogStars ?? [];
+  catalogById = new Map();
+  for (const e of catalogStars) catalogById.set(e[0], e);
 });
 
 poll(700, async () => {
   if (!gameId || !playerId) return;
   const state = await callTool<{
     position?: [number, number, number];
+    throttle?: number;
     targetId?: string | null;
     warpEngaged?: boolean;
     galaxy?: {
@@ -91,6 +117,7 @@ poll(700, async () => {
   if (state.galaxy?.nearbyPlayers) nearbyPlayers = state.galaxy.nearbyPlayers;
   targetId = state.targetId ?? null;
   warpEngaged = !!state.warpEngaged;
+  throttle = state.throttle ?? 0;
   render();
 });
 
@@ -98,6 +125,9 @@ poll(700, async () => {
 type Pill = { icon: string; value: string; tip: string };
 
 function render() {
+  // STOP is global — always reflect current motion state regardless
+  // of whether a target is locked.
+  btnStop.disabled = !warpEngaged && throttle <= 0.001;
   if (!targetId) {
     if (contentEl.style.display !== "none") contentEl.style.display = "none";
     if (emptyEl.style.display === "none") emptyEl.style.display = "";
@@ -168,6 +198,31 @@ function render() {
       pos = s.position;
       canWarp = true;
       pills.push({ icon: "✦", value: s.spectralType, tip: "Spectral class" });
+      if (s.radiusSolar != null) {
+        // Smart formatting: white-dwarf-scale (0.01) wants 3 decimals,
+        // sub-solar wants 2, supergiant scale wants integers.
+        const r = s.radiusSolar;
+        const valStr = r < 0.1 ? r.toFixed(3) : r < 10 ? r.toFixed(2) : r.toFixed(0);
+        pills.push({ icon: "⌀", value: `${valStr} R☉`, tip: "Stellar radius (solar radii)" });
+      }
+      if (s.distanceLy != null && s.distanceLy > 0) {
+        pills.push({ icon: "☉", value: `${s.distanceLy.toFixed(2)} ly`, tip: "Distance from Sol" });
+      }
+    } else {
+      // HYG catalog fallback. compact tuple = [id, x, y, z, sc, mag, radiusSolar].
+      const c = catalogById.get(targetId);
+      if (c) {
+        kind = "star";
+        name = c[0]; // raw HYG id (no nicer name in the compact payload)
+        pos = [c[1], c[2], c[3]];
+        canWarp = true;
+        pills.push({ icon: "✦", value: `${c[4]} · mag ${c[5].toFixed(1)}`, tip: "Spectral · magnitude" });
+        const r = c[6];
+        const valStr = r < 0.1 ? r.toFixed(3) : r < 10 ? r.toFixed(2) : r.toFixed(0);
+        pills.push({ icon: "⌀", value: `${valStr} R☉`, tip: "Stellar radius (solar radii)" });
+        const distFromSol = Math.hypot(c[1], c[2], c[3]);
+        pills.push({ icon: "☉", value: `${distFromSol.toFixed(2)} ly`, tip: "Distance from Sol" });
+      }
     }
   }
 
@@ -191,7 +246,8 @@ function render() {
   const wantStatus = warpEngaged;
   if (key === lastKey) {
     btnWarp.disabled = !canWarp;
-    btnStop.disabled = !warpEngaged;
+    // btnStop.disabled is handled once at the top of render() — STOP
+    // is global, not tied to the target-info cache key.
     statusEl.classList.toggle("hidden", !wantStatus);
     return;
   }
@@ -212,7 +268,7 @@ function render() {
   }
   btnWarp.disabled = !canWarp;
   btnAlign.disabled = false;
-  btnStop.disabled = !warpEngaged;
+  // btnStop.disabled handled at top of render() (global, not target-tied).
 }
 
 // --- Action buttons ------------------------------------------------------

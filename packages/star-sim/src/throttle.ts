@@ -4,7 +4,7 @@
  * cruise-into-system run is smooth whether autopilot-driven or
  * manually aimed.
  */
-import { LY_PER_AU } from "./constants.js";
+import { LY_PER_AU, WARP_MAX_LY_PER_S } from "./constants.js";
 
 /** Unified deceleration ladder used by BOTH autopilot's target throttle
  *  and the autobrake's cap.
@@ -48,11 +48,29 @@ export function departingImpulseThrottle(distAu: number): number {
   return 0.00782;                   // 0.6 AU/s (vs 0.4 near photosphere)
 }
 
-/** Autopilot's target throttle from distance-to-target. At cruise
- *  range (> 1 ly) we want full warp; closer in we share the brake's
- *  deceleration ladder so the smoothing converges to the right cap
- *  band without fighting the brake. */
+/** Autopilot's target throttle from distance-to-target.
+ *
+ *  Time-to-arrival model: target speed = distance / APPROACH_TIME_SEC,
+ *  i.e. the ship asymptotically closes the gap with an exponential
+ *  decay whose e-folding time is APPROACH_TIME_SEC. Converting back
+ *  to throttle via the cubic speed law gives a continuous,
+ *  position-keyed throttle that smoothly drops from the warp-9 cap
+ *  as the ship enters the brake zone (~5 ly out for 0.3 s constant).
+ *
+ *  Previously a stepped band-cap ladder + 0.85 throttle lerp; that
+ *  let the ship overshoot the arrival point by tens of AU because
+ *  the lerp couldn't ramp throttle down fast enough against the
+ *  cube-law speed. Continuous target + decel-snap in warp.ts fixes
+ *  it.
+ *
+ *  APPROACH_TIME_SEC tuning: total deceleration time (warp-9 cruise
+ *  → 1 AU arrival) is ~14× the constant in seconds — every halving
+ *  of distance costs ln(2) × APPROACH_TIME_SEC. 0.3 s gives a
+ *  ~3-4 s visible slowdown for a 4 ly approach, which reads as
+ *  "noticeable but quick". */
 export function autopilotTargetThrottle(distLy: number): number {
-  if (distLy > 1.0) return 0.95;
-  return speedCapThrottleByLy(distLy);
+  if (distLy <= 0) return 0;
+  const APPROACH_TIME_SEC = 0.3;
+  const desiredSpeed = distLy / APPROACH_TIME_SEC;
+  return Math.min(0.95, Math.cbrt(desiredSpeed / WARP_MAX_LY_PER_S));
 }

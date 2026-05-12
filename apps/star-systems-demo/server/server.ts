@@ -38,7 +38,7 @@ const DEBUG_LOG_PATH = process.env.DEBUG_LOG_PATH ?? "/tmp/cockpit-debug.log";
 // Truncate at startup so each subprocess (each new chat session) starts fresh.
 void writeFile(DEBUG_LOG_PATH, `--- session start ${new Date().toISOString()} pid=${process.pid} ---\n`).catch(() => {});
 
-import { STARS, STAR_INDEX, spectralBucket, starAbsMag, starRadiusSolar, type Planet, type PlanetKind, type SpectralClass, type Star } from "./astrodata.js";
+import { nearestStars, STARS, STAR_INDEX, spectralBucket, starAbsMag, starRadiusSolar, type Planet, type PlanetKind, type SpectralClass, type Star } from "./astrodata.js";
 import {
   MINDS,
   SHIP_CLASS_INFO,
@@ -59,7 +59,7 @@ import {
   type FullCatalog,
 } from "./catalog.js";
 import { generateTyped, getModel, getModelName, getProvider, hasCredentials } from "./llm.js";
-import { ORBITAL_DOCK_RANGE_LY } from "../../../packages/star-sim/src/index.js";
+import { AUTOPILOT_ARRIVAL_LY, ORBITAL_DOCK_RANGE_LY, SOL_RADIUS_LY } from "../../../packages/star-sim/src/index.js";
 
 const DIST_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "dist");
 const DATA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "data");
@@ -93,7 +93,10 @@ try { getCatalog(); } catch (e) {
 }
 
 /** Resolve a star id from either the curated 21 or the full catalog. */
-function resolveStar(id: string): Star | CatalogStar | null {
+/** Unified star lookup. Curated 21 win on id collision (via STAR_INDEX
+ *  first); HYG fallback via the full catalog so any of the 109k bright
+ *  ids can be resolved as a valid target/warp/observe destination. */
+export function resolveStar(id: string): Star | CatalogStar | null {
   if (STAR_INDEX[id]) return STAR_INDEX[id];
   if (_catalog) {
     const c = _catalog.byId.get(id);
@@ -107,18 +110,29 @@ function resolveStarName(id: string): string {
   return resolveStar(id)?.name ?? id;
 }
 
-/** Compact bright-catalog payload for the cockpit's THREE.Points backdrop.
- *  Returns one entry per star: position (ly), spectral class single letter,
- *  apparent magnitude (defaulted to absMag if missing). Curated stars are
- *  filtered out — they're rendered with the rich layered-sprite system. */
-function brightStarsPayload(): Array<[number, number, number, string, number]> {
+/** Full catalog payload for the cockpit. All ~109k HYG stars +
+ *  curated 21 as compact tuples:
+ *  `[id, x, y, z, spectralClass, mag, radiusSolar]`.
+ *  - id: stable string id (used as warp/observe target).
+ *  - position in light-years.
+ *  - spectralClass: single Harvard letter (O/B/A/F/G/K/M/L/T/WD/NS).
+ *  - mag: apparent magnitude (defaulted to absMag if missing, else 6).
+ *  - radiusSolar: physical radius (solar radii) — used to size the
+ *    real sphere mesh when the cockpit promotes a nearby star out of
+ *    the points-cloud backdrop into a full mesh.
+ *
+ *  Curated stars are INCLUDED so they appear as dots when viewed from
+ *  far away (e.g. seen from Rigel, Sol should still be a faint point).
+ *  The cockpit also renders the curated 21 as full spheres always; the
+ *  point gets hidden behind the sphere visually when close. */
+function brightStarsPayload(): Array<[string, number, number, number, string, number, number]> {
   if (!_catalog) return [];
-  const curatedIds = new Set(STARS.map((s) => s.id));
-  const out: Array<[number, number, number, string, number]> = [];
-  for (const s of _catalog.bright) {
-    if (curatedIds.has(s.id)) continue;
+  const out: Array<[string, number, number, number, string, number, number]> = [];
+  for (const s of _catalog.stars) {
+    if (s.distanceLy == null) continue; // skip HYG entries with unknown distance
     const mag = s.apparentMag ?? s.absMag ?? 6;
-    out.push([s.position[0], s.position[1], s.position[2], s.spectralClass, mag]);
+    const radius = s.radiusSolar ?? 1;
+    out.push([s.id, s.position[0], s.position[1], s.position[2], s.spectralClass, mag, radius]);
   }
   return out;
 }
@@ -917,10 +931,11 @@ export function createServer(): McpServer {
           gameId: galaxy.gameId,
           playerId: player.playerId,
           ship: { name: player.shipName, class: player.shipClass },
-          // Curated stars are the rows shown in the table. Omitting the
-          // 109k bright catalog: not actionable from the overview, would
-          // make the list useless. Each star carries its full planet
-          // list so the overview can also flatten planets into rows.
+          // Curated stars are the always-shown rows (with planet flatten).
+          // The full catalog ships alongside as `catalogStars` — the
+          // overview pane sorts by distance and shows the nearest N so
+          // the user can target/warp to any of the 109k HYG stars
+          // without it becoming a 109k-row table.
           stars: STARS.map((s) => ({
             id: s.id,
             name: s.name,
@@ -934,6 +949,7 @@ export function createServer(): McpServer {
               massEarths: p.massEarths, radiusEarths: p.radiusEarths,
             })) ?? [],
           })),
+          catalogStars: brightStarsPayload(),
         }),
       }] };
     },
@@ -966,11 +982,17 @@ export function createServer(): McpServer {
             spectralClass: s.spectralClass,
             spectralType: s.spectralType,
             lumClass: s.lumClass,
+            radiusSolar: starRadiusSolar(s),
+            distanceLy: s.distanceLy,
             planets: s.planets?.map((p) => ({
               name: p.name, kind: p.kind, orbitAU: p.orbitAU,
               massEarths: p.massEarths, radiusEarths: p.radiusEarths,
             })) ?? [],
           })),
+          // The full bright catalog so the pane can resolve HYG ids
+          // when the player targets a non-curated star. Without this,
+          // hd-40533 (or any HYG id) shows "?" + disabled WARP/ALIGN.
+          catalogStars: brightStarsPayload(),
         }),
       }] };
     },
@@ -1103,6 +1125,9 @@ export function createServer(): McpServer {
         nearbyPlayers: nearbyPlayers(galaxy, player).map((p) => ({
           shipName: p.shipName, mindName: p.mindName, distance: p.distance,
         })),
+        nearbyStars: nearestStars(player.position, 5).map(({ star, dist }) => ({
+          name: star.name, spectralType: star.spectralType, distanceLy: dist,
+        })),
         orbitals: galaxy.orbitals.map((o) => ({
           name: o.name,
           near: o.parentStarId ? STAR_INDEX[o.parentStarId]?.name : undefined,
@@ -1178,11 +1203,18 @@ export function createServer(): McpServer {
       const dy = star.position[1] - player.position[1];
       const dz = star.position[2] - player.position[2];
       const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      // Cockpit lerp halts at OBSERVE_RANGE_LY = 0.15 ly. Re-engaging warp
-      // inside that radius can't move the ship — the iframe wouldn't lerp,
-      // and the captain would still report "ship under way". Tell the
-      // caller we're already there so it can phrase the reply honestly.
-      if (dist <= 0.15) {
+      // "Already at" guard uses the autopilot's actual surface-aware
+      // arrival range: 1 AU + the star's radius. Inside that, the
+      // warp autopilot would instantly mark arrived and disengage
+      // on the first tick — engaging warp would be a no-op the user
+      // reads as "broken". Without the radius term, big stars (e.g.
+      // Betelgeuse @ 4.13 AU surface radius) trip this every time
+      // you re-engage from a previous arrival because the autopilot
+      // parks you ~5 AU from center while the old 1-AU check thinks
+      // you're still "far away".
+      const starRadiusLy = (star.radiusSolar ?? 1) * SOL_RADIUS_LY;
+      const alreadyAtRange = AUTOPILOT_ARRIVAL_LY + starRadiusLy;
+      if (dist <= alreadyAtRange) {
         return { content: [{
           type: "text",
           text: JSON.stringify({
@@ -1240,6 +1272,9 @@ export function createServer(): McpServer {
         compendiumSummary: compendiumSummary(player.compendium),
         nearbyPlayers: nearbyPlayers(galaxy, player).map((p) => ({
           shipName: p.shipName, mindName: p.mindName, distance: p.distance,
+        })),
+        nearbyStars: nearestStars(player.position, 5).map(({ star, dist }) => ({
+          name: star.name, spectralType: star.spectralType, distanceLy: dist,
         })),
         orbitals: galaxy.orbitals.map((o) => ({
           name: o.name,

@@ -141,6 +141,65 @@ local player, skip applying server fields the player controls
 (throttle slider feedback, drag-to-look) to avoid snap-back — that's
 "client prediction lite" without running physics.
 
+### Future: client-side Havok (prediction layer, not authority)
+
+The Babylon migration left a natural seam to add browser-side
+prediction WITHOUT giving up server authority. If we ever want
+asteroid bumps, near-miss shake, projectile flight, or any other
+physical feedback that benefits from sub-tick smoothness, the shape
+is:
+
+- **Havok in the cockpit iframe only.** Babylon ships `HavokPlugin`
+  (`@babylonjs/havok`, WASM, ~700 KB gzipped). Use it strictly as a
+  *prediction layer* — never the source of truth. Spin up
+  `new HavokPlugin(true, await HavokPhysics())` and call
+  `scene.enablePhysics(null, plugin)` only after the iframe is loaded
+  and Colyseus has joined; don't bake it into the cold path.
+- **Server stays Rapier.** Authoritative ship/asteroid/projectile
+  motion still ticks in `apps/star-systems-demo/server/src/room.ts`
+  at 20 Hz. The client Havok world receives those positions as
+  *inputs*, not as state to integrate.
+- **Reconciliation pattern.** Each server tick, the client takes the
+  authoritative pose for every body and either (a) hard-snaps it if
+  the error is large (>1 ship length), or (b) lerps the Havok body's
+  kinematic position toward the authoritative one with a fast
+  half-life (~80 ms) so Havok keeps "doing its thing" between
+  snapshots — collision callbacks, contact-forces visuals — and
+  visibly converges on truth. Pattern is the same one shipped games
+  use (Quake-style entity replication with smoothing).
+- **Local player input** can be predicted *cheaply*: integrate the
+  throttle locally for the local ship's velocity, then correct on
+  the next server snapshot. Same "skip-the-snap-back" trick we
+  already use for yaw/throttle, just with one more field
+  (velocity).
+- **Don't ship physics state over the wire.** The client Havok world
+  is a derived view. Only positions/velocities and discrete events
+  (e.g. `projectile_hit`, `dock_lock`) need to cross the boundary.
+  Two physics engines simulating the same scene from the same inputs
+  will diverge — that's expected; the snapshot pulls Havok back
+  every 50 ms.
+- **Determinism is not required for the client.** Server already has
+  it; client just needs to "look right" between snapshots.
+
+Concretely, the wire-up points when we add this:
+
+1. Cockpit iframe: import `@babylonjs/havok`, enable physics on the
+   scene, give the local ship a kinematic body, give other ships /
+   asteroids dynamic bodies. Set `body.disablePreStep = true` so
+   Havok doesn't fight our position writes.
+2. In the Colyseus `players.onAdd` callback, attach a Havok body to
+   each new ship sprite. In the per-frame tick, set
+   `body.transformNode.position` from the snapshot and let Havok
+   advance contact resolution.
+3. Server: nothing changes. Keep authoritative Rapier, keep the same
+   Colyseus state shape. (Optional later: stream Rapier's contact
+   events over Colyseus as one-shots so the client can play a sound
+   without Havok needing to re-derive them.)
+
+Cost when we do this: ~700 KB iframe bundle, ~1-2 ms/frame on
+mid-range GPUs for hundreds of bodies. Reasonable budget for the
+visual payoff. Until then, the simple lerp is fine.
+
 ### Why not SpacetimeDB
 
 The user asked. The answer is skip — for two reasons that compound:
