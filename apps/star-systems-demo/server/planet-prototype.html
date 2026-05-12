@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Planet imagery prototype · three.js + WebGPU</title>
+    <title>Planet imagery prototype · Babylon WebGL2 + PBR</title>
     <style>
       :root {
         color-scheme: dark;
@@ -37,9 +37,41 @@
       .panel label { color: var(--dim); min-width: 70px; }
       .panel input[type="range"] { accent-color: var(--accent); flex: 1; }
 
-      #top-left { top: 12px; left: 12px; min-width: 220px; }
+      #top-left {
+        top: 12px; left: 12px;
+        width: 280px; max-height: calc(100vh - 24px);
+        overflow-y: auto; padding-right: 6px;
+      }
+      #top-left::-webkit-scrollbar { width: 6px; }
+      #top-left::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
       #top-right { top: 12px; right: 12px; max-width: 280px; }
       #bottom-left { bottom: 12px; left: 12px; max-width: 380px; font-size: 10px; color: var(--dim); }
+
+      /* Section header inside the tuning panel — clickable to collapse */
+      .section {
+        margin-top: 10px;
+        border-top: 1px solid var(--line);
+        padding-top: 6px;
+      }
+      .section:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+      .section h3 {
+        font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+        color: var(--ink); margin: 0 0 4px; cursor: pointer; user-select: none;
+        display: flex; align-items: center; gap: 6px;
+      }
+      .section h3::before { content: "▾"; font-size: 9px; opacity: 0.6; }
+      .section.collapsed h3::before { content: "▸"; }
+      .section.collapsed .section-body { display: none; }
+      .section .row label { min-width: 88px; font-size: 10px; }
+      .section .row select {
+        flex: 1; background: rgba(0,0,0,0.3); color: var(--ink);
+        border: 1px solid var(--line); padding: 2px 4px;
+        font: inherit; font-size: 10px;
+      }
+      .section .val {
+        color: var(--dim); font-size: 9px; min-width: 38px;
+        text-align: right; font-variant-numeric: tabular-nums;
+      }
 
       .body-list { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px; }
       .body-list button {
@@ -76,23 +108,10 @@
     <div class="panel" id="top-left">
       <h2>Renderer</h2>
       <div id="status">initializing…</div>
-      <h2 style="margin-top: 8px;">Controls</h2>
-      <div class="row">
-        <label for="spin">Spin</label>
-        <input type="range" id="spin" min="0" max="2" step="0.01" value="0.4" />
-      </div>
-      <div class="row">
-        <label for="sun-az">Sun az</label>
-        <input type="range" id="sun-az" min="-180" max="180" step="1" value="40" />
-      </div>
-      <div class="row">
-        <label for="sun-el">Sun el</label>
-        <input type="range" id="sun-el" min="-89" max="89" step="1" value="15" />
-      </div>
-      <div class="row">
-        <label for="atmo">Atmo</label>
-        <input type="range" id="atmo" min="0" max="2" step="0.01" value="1" />
-      </div>
+      <!-- All tuning sections are built by JS from the TUNABLES schema
+           in planet-prototype-main.ts. Section headers collapse the
+           body when clicked so the panel stays compact. -->
+      <div id="tuning"></div>
     </div>
 
     <div class="panel" id="top-right">
