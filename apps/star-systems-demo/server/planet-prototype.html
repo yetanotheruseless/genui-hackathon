@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Planet imagery prototype · three.js + WebGPU</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #04060a;
+        --panel: rgba(8, 12, 22, 0.78);
+        --line: #1d273a;
+        --ink: #cfd6e6;
+        --dim: #7c8499;
+        --accent: #7ad7ff;
+        --warn: #ffb86b;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow: hidden; }
+      canvas { display: block; width: 100%; height: 100%; }
+
+      .panel {
+        position: absolute;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 8px 10px;
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+      }
+      .panel h2 {
+        font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+        color: var(--dim); margin: 0 0 6px;
+      }
+      .panel .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+      .panel label { color: var(--dim); min-width: 70px; }
+      .panel input[type="range"] { accent-color: var(--accent); flex: 1; }
+
+      #top-left { top: 12px; left: 12px; min-width: 220px; }
+      #top-right { top: 12px; right: 12px; max-width: 280px; }
+      #bottom-left { bottom: 12px; left: 12px; max-width: 380px; font-size: 10px; color: var(--dim); }
+
+      .body-list { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 4px; }
+      .body-list button {
+        background: transparent; color: var(--ink); border: 1px solid var(--line);
+        border-radius: 3px; padding: 4px 6px; font: inherit; cursor: pointer; text-align: left;
+      }
+      .body-list button:hover { border-color: var(--accent); color: var(--accent); }
+      .body-list button.active { border-color: var(--accent); color: var(--accent); background: rgba(122, 215, 255, 0.08); }
+
+      #status { color: var(--accent); }
+      #status .warn { color: var(--warn); }
+
+      .info-name { color: var(--accent); font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+      .info-kv { display: flex; gap: 6px; }
+      .info-kv .k { color: var(--dim); min-width: 70px; }
+      .info-kv .v { color: var(--ink); }
+      .info-desc { color: var(--ink); margin-top: 6px; line-height: 1.4; }
+      .info-credit { color: var(--dim); margin-top: 6px; font-size: 10px; }
+      .info-credit a { color: inherit; text-decoration: underline dotted; }
+
+      .missing-banner {
+        position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        background: rgba(40, 16, 0, 0.85); border: 1px solid var(--warn);
+        color: var(--warn); padding: 14px 20px; border-radius: 4px; max-width: 480px;
+        line-height: 1.5; display: none;
+      }
+      .missing-banner.show { display: block; }
+      .missing-banner code { background: rgba(0,0,0,0.4); padding: 1px 5px; border-radius: 2px; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+
+    <div class="panel" id="top-left">
+      <h2>Renderer</h2>
+      <div id="status">initializing…</div>
+      <h2 style="margin-top: 8px;">Controls</h2>
+      <div class="row">
+        <label for="spin">Spin</label>
+        <input type="range" id="spin" min="0" max="2" step="0.01" value="0.4" />
+      </div>
+      <div class="row">
+        <label for="sun-az">Sun az</label>
+        <input type="range" id="sun-az" min="-180" max="180" step="1" value="40" />
+      </div>
+      <div class="row">
+        <label for="sun-el">Sun el</label>
+        <input type="range" id="sun-el" min="-89" max="89" step="1" value="15" />
+      </div>
+      <div class="row">
+        <label for="atmo">Atmo</label>
+        <input type="range" id="atmo" min="0" max="2" step="0.01" value="1" />
+      </div>
+    </div>
+
+    <div class="panel" id="top-right">
+      <h2>Body</h2>
+      <div class="body-list" id="body-list"></div>
+    </div>
+
+    <div class="panel" id="info-panel" style="bottom: 12px; right: 12px; max-width: 320px;">
+      <div class="info-name" id="info-name">—</div>
+      <div class="info-kv"><span class="k">type</span><span class="v" id="info-type">—</span></div>
+      <div class="info-kv"><span class="k">radius</span><span class="v" id="info-radius">—</span></div>
+      <div class="info-kv"><span class="k">layers</span><span class="v" id="info-layers">—</span></div>
+      <div class="info-desc" id="info-desc"></div>
+      <div class="info-credit" id="info-credit"></div>
+    </div>
+
+    <div class="missing-banner" id="missing-banner">
+      <strong>No textures found.</strong><br>
+      Run <code>npx tsx scripts/fetch-planet-textures.ts</code> from
+      <code>apps/star-systems-demo/server/</code> first. The page will
+      keep rendering with procedurally-coloured spheres until you do.
+    </div>
+
+    <script type="module" src="/src/planet-prototype-main.ts"></script>
+  </body>
+</html>

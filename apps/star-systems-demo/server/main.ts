@@ -46,6 +46,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { Server as ColyseusServer } from "colyseus";
 import { WebSocketTransport } from "@colyseus/ws-transport";
 import cors from "cors";
+import express from "express";
 import type { Request, Response } from "express";
 import RAPIER from "@dimforge/rapier3d-deterministic-compat";
 import { createServer, getGalaxies, hydrateGalaxy } from "./server.js";
@@ -61,8 +62,6 @@ let snapshotTimer: NodeJS.Timeout | null = null;
 function initPersistence(): void {
   if (!persistenceEnabled()) return;
   openPersistence();
-  // Disk JSON is `unknown`-typed; hydrateGalaxy trusts the shape (we
-  // wrote it ourselves on the previous run).
   for (const snap of loadAllGalaxies()) hydrateGalaxy(snap as Parameters<typeof hydrateGalaxy>[0]);
   snapshotTimer = setInterval(() => {
     try { snapshotAll(getGalaxies()); }
@@ -82,14 +81,25 @@ async function startHttp(create: () => McpServer): Promise<void> {
   const app = createMcpExpressApp({ host: "0.0.0.0" });
   app.use(cors());
 
+  const HERE = path.dirname(fileURLToPath(import.meta.url));
+
   // Pass 2 smoke-test page — opens a Colyseus client connection,
   // shows the authoritative state, lets you send input intents and
   // engage warp without involving the cockpit iframe. Available at
   // http://localhost:3030/smoke.
-  const HERE = path.dirname(fileURLToPath(import.meta.url));
   app.get("/smoke", (_req: Request, res: Response) => {
     res.sendFile(path.join(HERE, "smoke.html"));
   });
+
+  // Static planetary imagery + the prototype HTML page. Textures are
+  // fetched via `npm run fetch:textures` (CC BY 4.0 from Solar System
+  // Scope); the page is built into `dist/` by vite. Both routes are
+  // no-ops if the corresponding files don't exist yet.
+  const dataDir = path.resolve(HERE, "data");
+  const distDir = path.resolve(HERE, "dist");
+  app.use("/textures", express.static(path.join(dataDir, "textures"), { maxAge: "1h" }));
+  app.get("/textures.json", (_req, res) => res.sendFile(path.join(dataDir, "textures.json")));
+  app.get("/planet-prototype", (_req, res) => res.sendFile(path.join(distDir, "planet-prototype.html")));
 
   app.all("/mcp", async (req: Request, res: Response) => {
     const server = create();
@@ -114,6 +124,7 @@ async function startHttp(create: () => McpServer): Promise<void> {
   });
   const httpServer = app.listen(port, () => {
     console.log(`Star-Systems MCP Apps server listening on http://localhost:${port}/mcp`);
+    console.log(`Planet-imagery prototype at         http://localhost:${port}/planet-prototype`);
   });
 
   // Pass 2: Colyseus runs on its own port (default 2567 via
