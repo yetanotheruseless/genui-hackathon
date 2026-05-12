@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Solar System · multi-body Babylon scene</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #04060a;
+        --panel: rgba(8, 12, 22, 0.78);
+        --line: #1d273a;
+        --ink: #cfd6e6;
+        --dim: #7c8499;
+        --accent: #7ad7ff;
+        --warn: #ffb86b;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--ink);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; overflow: hidden; }
+      canvas { display: block; width: 100%; height: 100%; outline: none; }
+      .panel { position: absolute; background: var(--panel); border: 1px solid var(--line);
+        border-radius: 4px; padding: 8px 10px; backdrop-filter: blur(6px); }
+      .panel h2 { font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+        color: var(--dim); margin: 0 0 6px; }
+      #top-left { top: 12px; left: 12px; max-width: 320px; line-height: 1.5; color: var(--dim); }
+      #top-left b { color: var(--ink); }
+      #bottom-left { bottom: 12px; left: 12px; max-width: 440px; line-height: 1.4; color: var(--dim); font-size: 11px; }
+      #bottom-left b { color: var(--ink); }
+      #bottom-left .real  { color: #87f1a5; }
+      #bottom-left .fake  { color: var(--warn); }
+      #top-right { top: 12px; right: 12px; max-width: 220px; }
+      #status { color: var(--accent); margin-bottom: 6px; }
+      .body-list { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+      .body-list button { background: transparent; color: var(--ink); border: 1px solid var(--line);
+        border-radius: 3px; padding: 4px 6px; font: inherit; cursor: pointer; text-align: left; }
+      .body-list button:hover { border-color: var(--accent); color: var(--accent); }
+      .body-list button.active { border-color: var(--accent); color: var(--accent); background: rgba(122, 215, 255, 0.08); }
+      .missing-banner { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        background: rgba(40, 16, 0, 0.85); border: 1px solid var(--warn);
+        color: var(--warn); padding: 14px 20px; border-radius: 4px; max-width: 480px;
+        line-height: 1.5; display: none; }
+      .missing-banner.show { display: block; }
+      .missing-banner code { background: rgba(0,0,0,0.4); padding: 1px 5px; border-radius: 2px; color: #fff; }
+    </style>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+
+    <div class="panel" id="top-left">
+      <div id="status">initializing…</div>
+      <div><b>WASD</b> translate · <b>Mouse drag</b> look · <b>Shift</b> boost · <b>Space</b>/<b>C</b> up/down</div>
+      <div style="margin-top:4px">Click a body on the right to fly there.</div>
+    </div>
+
+    <div class="panel" id="top-right">
+      <h2>Solar System</h2>
+      <div class="body-list" id="body-list"></div>
+    </div>
+
+    <div class="panel" id="bottom-left">
+      <b>Realism</b><br>
+      <span class="real">REAL:</span> planet positions (true AU + J2000 angles), NASA surface textures, star directions / spectral colors / apparent magnitudes (HYG catalog)<br>
+      <span class="fake">EXAGGERATED:</span> planet visual radii (Earth ≈ 1300× real), star brightness compressed (linear^0.20 with 0.18 floor), backdrop at 200 AU instead of light-years<br>
+      <span style="opacity:0.7">Tunables documented in <code style="color:var(--ink)">src/sol-system-main.ts</code> top comment.</span>
+    </div>
+
+    <div class="missing-banner" id="missing-banner">
+      <strong>No textures found.</strong><br>
+      Run <code>npx tsx scripts/fetch-planet-textures.ts</code> from
+      <code>apps/star-systems-demo/server/</code>, then refresh.
+    </div>
+
+    <script type="module" src="/src/sol-system-main.ts"></script>
+  </body>
+</html>

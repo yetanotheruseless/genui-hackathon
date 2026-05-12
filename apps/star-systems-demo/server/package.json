@@ -11,10 +11,11 @@
     "build:overview": "cross-env INPUT=overview.html vite build",
     "build:targetinfo": "cross-env INPUT=target-info.html vite build",
     "build:planet-prototype": "cross-env INPUT=planet-prototype.html vite build",
-    "build:panes": "npm run build:cockpit && npm run build:compendium && npm run build:bridge && npm run build:overview && npm run build:targetinfo && npm run build:planet-prototype",
+    "build:sol-system": "cross-env INPUT=sol-system.html vite build",
+    "build:panes": "npm run build:cockpit && npm run build:compendium && npm run build:bridge && npm run build:overview && npm run build:targetinfo && npm run build:planet-prototype && npm run build:sol-system",
     "build": "tsc --noEmit && tsc -p tsconfig.server.json && npm run build:panes",
     "fetch:textures": "tsx scripts/fetch-planet-textures.ts",
-    "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=cockpit.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=compendium.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=bridge.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=overview.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=target-info.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=planet-prototype.html vite build --watch\" \"tsx watch main.ts\"",
+    "start": "concurrently --raw \"cross-env NODE_ENV=development INPUT=cockpit.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=compendium.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=bridge.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=overview.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=target-info.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=planet-prototype.html vite build --watch\" \"cross-env NODE_ENV=development INPUT=sol-system.html vite build --watch\" \"tsx watch main.ts\"",
     "start:stdio": "tsx main.ts --stdio"
   },
   "dependencies": {
