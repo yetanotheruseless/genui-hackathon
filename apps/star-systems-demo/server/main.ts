@@ -101,6 +101,21 @@ async function startHttp(create: () => McpServer): Promise<void> {
   app.get("/textures.json", (_req, res) => res.sendFile(path.join(dataDir, "textures.json")));
   app.get("/planet-prototype", (_req, res) => res.sendFile(path.join(distDir, "planet-prototype.html")));
 
+  // Sol-tour test page: real NASA textures on the 8 planets plus the
+  // HYG starfield, all together in one navigable scene. /api/bright
+  // exposes the same [id,x,y,z,sc,mag,radius] catalog that start_starship
+  // includes in its init payload, so the page can build the cloud
+  // without going through MCP.
+  app.get("/sol-tour", (_req, res) => res.sendFile(path.join(distDir, "sol-tour.html")));
+  app.get("/api/bright", async (_req: Request, res: Response) => {
+    try {
+      const mod = await import("./server.js") as { brightStarsPayload: () => unknown };
+      res.json({ stars: mod.brightStarsPayload() });
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
   app.all("/mcp", async (req: Request, res: Response) => {
     const server = create();
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });

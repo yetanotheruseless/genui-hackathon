@@ -125,7 +125,7 @@ function resolveStarName(id: string): string {
  *  far away (e.g. seen from Rigel, Sol should still be a faint point).
  *  The cockpit also renders the curated 21 as full spheres always; the
  *  point gets hidden behind the sphere visually when close. */
-function brightStarsPayload(): Array<[string, number, number, number, string, number, number]> {
+export function brightStarsPayload(): Array<[string, number, number, number, string, number, number]> {
   if (!_catalog) return [];
   const out: Array<[string, number, number, number, string, number, number]> = [];
   for (const s of _catalog.stars) {

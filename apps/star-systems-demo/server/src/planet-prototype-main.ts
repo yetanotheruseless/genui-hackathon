@@ -32,7 +32,7 @@
  * planet rendering. Load at /planet-prototype.
  */
 import {
-  ArcRotateCamera,
+  Camera,
   Color3,
   Color4,
   Constants,
@@ -48,6 +48,7 @@ import {
   Scene,
   ShaderMaterial,
   Texture,
+  UniversalCamera,
   Vector3,
   VertexData,
 } from "@babylonjs/core";
@@ -377,39 +378,80 @@ void main() {
 }
 `;
 
-// Hot→cold spectral palette. Roughly matches cockpit's
-// `starEmissiveColor` for the common types we'll see in a 6k sample.
-const SPECTRAL_SWATCHES: [number, number, number][] = [
-  [0.62, 0.74, 1.00],   // O — blue-white
-  [0.78, 0.85, 1.00],   // B
-  [0.92, 0.93, 1.00],   // A — white
-  [1.00, 0.98, 0.84],   // F — pale yellow
-  [1.00, 0.94, 0.70],   // G — sun-like
-  [1.00, 0.82, 0.55],   // K — orange
-  [1.00, 0.65, 0.45],   // M — red dwarf
-];
+// Spectral → emissive RGB. Same table as `starEmissiveColor` in cockpit-main.ts.
+function spectralRgb(sc: string | undefined): [number, number, number] {
+  switch (sc) {
+    case "O":  return [0.65, 0.78, 1.00];
+    case "B":  return [0.78, 0.88, 1.00];
+    case "A":  return [1.00, 1.00, 1.00];
+    case "F":  return [1.00, 0.97, 0.85];
+    case "G":  return [1.00, 0.92, 0.70];
+    case "K":  return [1.00, 0.75, 0.45];
+    case "M":  return [1.00, 0.50, 0.30];
+    case "WD": return [0.95, 0.95, 1.00];
+    case "NS": return [0.80, 0.95, 1.00];
+    case "L": case "T": case "Y": return [0.45, 0.20, 0.15];
+    default:   return [1.00, 0.92, 0.70];
+  }
+}
 
-function buildStarfield(scene: Scene): Mesh {
-  const N = 6000;
-  const R = 80;          // backdrop radius
+type BrightStar = [string, number, number, number, string, number, number];
+
+/** Project real HYG-catalog directions onto a sphere at radius R —
+ *  prototype's camera sits a few units from the planet at origin, so
+ *  the backdrop reads as "at infinity." Each star's angular position
+ *  matches reality; spectral colour and apparent magnitude come from
+ *  the catalog (`/api/bright`, served by main.ts from
+ *  `brightStarsPayload()` in server.ts). Swivel the camera around the
+ *  planet and the real constellations track with you. */
+function buildStarfieldFromCatalog(scene: Scene, stars: BrightStar[]): Mesh {
+  const R = 80;
   const positions: number[] = [];
   const colors: number[] = [];
+  for (const s of stars) {
+    const [, x, y, z, sc, mag] = s;
+    const len = Math.hypot(x, y, z);
+    if (len < 1e-6) continue;             // skip Sol at the origin
+    const k = R / len;
+    positions.push(x * k, y * k, z * k);
+    const [sr, sg, sb] = spectralRgb(sc);
+    const linear = Math.pow(10, -0.4 * (mag ?? 6));
+    const intensity = Math.max(0.18, Math.min(1, Math.pow(linear, 0.20)));
+    const sizeHint = Math.max(1, Math.min(4, 4 - (mag ?? 6) * 0.4));
+    colors.push(sr * intensity, sg * intensity, sb * intensity, sizeHint);
+  }
+  return finalizeStarfield(scene, positions, colors);
+}
+
+/** Fallback for when `/api/bright` is empty (HYG fetch script not run
+ *  yet) — the page still gets a backdrop so it's visibly broken in an
+ *  obvious-from-the-distribution way (procedural, not real
+ *  constellations). */
+function buildStarfieldProcedural(scene: Scene): Mesh {
+  const N = 6000;
+  const R = 80;
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const SWATCHES: [number, number, number][] = [
+    [0.62, 0.74, 1.00], [0.78, 0.85, 1.00], [0.92, 0.93, 1.00],
+    [1.00, 0.98, 0.84], [1.00, 0.94, 0.70], [1.00, 0.82, 0.55],
+    [1.00, 0.65, 0.45],
+  ];
   for (let i = 0; i < N; i++) {
-    // Uniform sphere via 2-axis rejection ish: z uniform in [-1,1], θ uniform.
     const z = Math.random() * 2 - 1;
     const phi = Math.random() * Math.PI * 2;
     const s = Math.sqrt(1 - z * z);
     positions.push(R * s * Math.cos(phi), R * z, R * s * Math.sin(phi));
-    // Magnitude-like log distribution: most stars dim, a few bright.
-    const u = Math.random();
-    // 4th-root compresses brightness toward perceptual scale.
-    const brightness = Math.pow(u, 4);
-    const [sr, sg, sb] = SPECTRAL_SWATCHES[(Math.random() * SPECTRAL_SWATCHES.length) | 0];
+    const brightness = Math.pow(Math.random(), 4);
+    const [sr, sg, sb] = SWATCHES[(Math.random() * SWATCHES.length) | 0];
     const intensity = 0.35 + 0.65 * brightness;
-    // alpha doubles as point-size hint: 1 px floor, brightest get ~4 px.
     const sizeHint = 1.0 + 3.0 * brightness;
     colors.push(sr * intensity, sg * intensity, sb * intensity, sizeHint);
   }
+  return finalizeStarfield(scene, positions, colors);
+}
+
+function finalizeStarfield(scene: Scene, positions: number[], colors: number[]): Mesh {
   const mesh = new Mesh("starfield", scene);
   const data = new VertexData();
   data.positions = positions;
@@ -834,23 +876,25 @@ async function main() {
   scene.clearColor = new Color4(0, 0, 0, 1);
   scene.useRightHandedSystem = true;
 
-  // ArcRotateCamera — Babylon's drop-in for three.js OrbitControls.
-  // Initial framing matches the three.js version's (0, 0.3, 3.2)
-  // perspective: ~3 unit radius, slight elevation.
-  const camera = new ArcRotateCamera(
-    "cam",
-    -Math.PI / 2,
-    1.27,           // β = ~73° (slight tilt down)
-    3.2,
-    Vector3.Zero(),
-    scene,
-  );
+  // UniversalCamera — free-fly: WASD to translate, mouse-drag to look
+  // around. Planet stays at world origin; the camera moves through
+  // space relative to it, so the starfield (sphere at radius 80)
+  // gives correct parallax as you fly. Spawn 3.2 units back along
+  // -Z with a slight downward tilt, matching the previous orbit-
+  // mode framing.
+  const camera = new UniversalCamera("cam", new Vector3(0, 0.6, 3.2), scene);
+  camera.setTarget(Vector3.Zero());
   camera.attachControl(canvas, true);
-  camera.lowerRadiusLimit = 1.3;
-  camera.upperRadiusLimit = 8;
-  camera.wheelDeltaPercentage = 0.02;
+  camera.speed = 0.04;            // units per keyboard tick (planet is 2u across)
+  camera.angularSensibility = 4000;
+  camera.inertia = 0.85;          // smooth keyboard moves
+  // WASD on top of the default arrow keys.
+  camera.keysUp.push(87);    // W
+  camera.keysDown.push(83);  // S
+  camera.keysLeft.push(65);  // A
+  camera.keysRight.push(68); // D
   camera.minZ = 0.01;
-  camera.maxZ = 100;
+  camera.maxZ = 200;          // raised from 100 — starfield is at radius 80
 
   // Single directional sun + a faint hemispheric to keep the night
   // side from going pure-black. Intensities mirror three.js prototype.
@@ -877,7 +921,26 @@ async function main() {
     setTimeout(() => missingBanner.classList.remove("show"), 6000);
   }
 
-  buildStarfield(scene);
+  // Real HYG-catalog stars if available, procedural otherwise. The
+  // catalog is served by `/api/bright` (see main.ts) which calls
+  // `brightStarsPayload()` — so the page gets a real Milky Way
+  // backdrop when `npx tsx scripts/fetch-hyg.ts` has been run.
+  try {
+    const r = await fetch("/api/bright");
+    if (r.ok) {
+      const data = await r.json() as { stars?: BrightStar[] };
+      if (data.stars && data.stars.length > 0) {
+        buildStarfieldFromCatalog(scene, data.stars);
+      } else {
+        buildStarfieldProcedural(scene);
+      }
+    } else {
+      buildStarfieldProcedural(scene);
+    }
+  } catch (e) {
+    console.warn("[planet-prototype] /api/bright fetch failed:", e);
+    buildStarfieldProcedural(scene);
+  }
 
   buildBodyButtons();
   await selectBody(BODIES[3]);   // Earth as the opening shot
@@ -916,7 +979,7 @@ async function main() {
 // dirty-tracking and Babylon is happy with it; setters cache values
 // internally and only flag dirty when something actually changed.
 // ---------------------------------------------------------------------------
-function applyTuning(camera: ArcRotateCamera, sun: DirectionalLight, dt: number): void {
+function applyTuning(camera: Camera, sun: DirectionalLight, dt: number): void {
   if (!active) return;
   const spin = T("spin");
   active.current.base.rotation.y += dt * spin * 0.25;
